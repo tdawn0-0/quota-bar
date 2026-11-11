@@ -79,7 +79,7 @@ pub const PROVIDERS: &[Provider] = &[
         id: "claude",
         short: "cc",
         title: "Claude Code",
-        kind: Kind::Blocking(claude),
+        kind: Kind::Blocking(|_now| claude()),
     },
     Provider {
         id: "opencode",

@@ -21,6 +21,43 @@ ag 16%  cc 78%  oc 93%
 - Opening the panel never fetches: it shows the numbers already in memory.
   Data is refreshed at launch, every five minutes, and on the refresh button.
 
+## Providers
+
+Each provider can be shown or hidden from the tray's **显示** submenu. The
+choice is saved to `config.json` in the app's data directory, which on macOS
+is:
+
+```
+~/Library/Application Support/bar.jyeu.quota/config.json
+```
+
+`QUOTA_BAR_CONFIG` overrides the path. Every provider is on unless its entry
+says otherwise, so a missing file (or a provider added by a later version)
+starts enabled:
+
+```json
+{
+  "providers": {
+    "antigravity": true,
+    "claude": true,
+    "opencode": false
+  }
+}
+```
+
+An entry can also be an object, which leaves room for provider settings later:
+
+```json
+"claude": { "enabled": false }
+```
+
+Edits to the file take effect on the next refresh (the refresh button or menu
+item, otherwise within five minutes). Hidden providers are neither fetched nor
+shown in the menu bar and panel.
+
+To add a provider, add its collector in `src/quota.rs` and one entry to
+`PROVIDERS` there; the tray menu, config file and footer pick it up.
+
 ## Resource budget
 
 The point of writing this in Rust is that an idle app should be close to free.
@@ -66,7 +103,8 @@ vibrancy material would need the platform layer.
 
 ```
 src/lib.rs     tray item, popup panel, refresh policy
-src/quota.rs   one collector per source, parsing and formatting
+src/config.rs  which providers are on, read from and saved to config.json
+src/quota.rs   the providers, one collector each, parsing and formatting
 src/main.rs    cargo run entry (AppKit backend)
 nsh.json       app metadata, accessory policy, hidden main window
 ```

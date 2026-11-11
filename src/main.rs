@@ -16,7 +16,6 @@ fn main() -> impl std::process::Termination {
         platform::AppSource::Rust(platform::Root::of::<quota_bar::App>()),
         platform::AppOptions {
             title: "Quota Bar".to_owned(),
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
             app_id: "bar.jyeu.quota".to_owned(),
             size: (360, 520),
             activation_policy: platform::ActivationPolicy::Accessory,

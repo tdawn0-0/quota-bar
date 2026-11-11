@@ -5,9 +5,11 @@
 //! refresh control or menu item asks. The panel is a popup window that closes
 //! on blur, so an idle app is one tray item and a few kilobytes of state.
 
+mod config;
 mod quota;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::time::Duration;
 
 use nsh_base::theme;
@@ -22,7 +24,7 @@ use nsh_core::time::unix_ms;
 use quota::Source;
 
 const PANEL_WIDTH: f32 = 344.0;
-const PANEL_HEIGHT: f32 = 656.0;
+const PANEL_MAX_HEIGHT: f32 = 656.0;
 
 const BLUE: u32 = 0x0a84ff;
 const AMBER: u32 = 0xff9f0a;
@@ -35,12 +37,15 @@ thread_local! {
     static OPENED_AT: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
 }
 
-/// The three signals the app shares between its tray handler and its panel.
+/// The signals the app shares between its tray handler and its panel.
 #[derive(Clone, Copy)]
 struct Store {
     sources: Signal<Vec<Source>>,
     updated: Signal<f64>,
     busy: Signal<bool>,
+    /// Set when a refresh was asked for while one was running.
+    pending: Signal<bool>,
+    config: Signal<config::Config>,
 }
 
 #[native_module("quota-bar/native")]
@@ -54,6 +59,11 @@ pub fn App() -> impl IntoElement {
         sources: signal(Vec::<Source>::new()),
         updated: signal(0.0_f64),
         busy: signal(false),
+        pending: signal(false),
+        config: signal(config::Config::load().unwrap_or_else(|error| {
+            eprintln!("[quota-bar] config: {error}; showing every provider");
+            config::Config::default()
+        })),
     };
 
     // One fetch at launch, then only on demand.
@@ -96,50 +106,118 @@ pub fn App() -> impl IntoElement {
     view().w_full().h_full()
 }
 
-/// Collects every source and updates the signals. Runs at most once at a time.
+/// Collects every enabled source and updates the signals. Runs at most once
+/// at a time; a request that arrives meanwhile runs once this one is done.
 fn refresh(store: Store) {
     if store.busy.get() {
+        store.pending.set(true);
         return;
     }
-    store.busy.set(true);
-    let now = unix_ms() as u64;
-    spawn(async move {
-        // All three start at once; each lands in the panel as soon as it is
-        // ready, so the slow CLI never holds the quick one back.
-        let agy = blocking(move || quota::antigravity(now));
-        let claude = blocking(quota::claude);
+    store.pending.set(false);
 
-        let opencode = quota::opencode().await;
-        upsert(store, opencode);
-        if let Ok(source) = claude.await {
-            upsert(store, source);
+    // Pick up a config file edited outside the app.
+    let config = config::Config::reload(&store.config.get());
+    if config != store.config.get() {
+        store.config.set(config);
+        prune(store);
+    }
+    let config = store.config.get();
+    let now = unix_ms() as u64;
+
+    // Start every enabled source at once; each lands in the panel as soon as
+    // it is ready, so a slow CLI never holds a quick one back.
+    let mut blocking_jobs = Vec::new();
+    let mut async_jobs = Vec::new();
+    for provider in quota::PROVIDERS
+        .iter()
+        .filter(|provider| config.enabled(provider.id))
+    {
+        match &provider.kind {
+            quota::Kind::Blocking(collect) => {
+                let collect = *collect;
+                blocking_jobs.push(blocking(move || collect(now)));
+            }
+            quota::Kind::Async(collect) => {
+                let collect = *collect;
+                async_jobs.push(collect());
+            }
         }
-        if let Ok(source) = agy.await {
-            upsert(store, source);
-        }
+    }
+
+    // Nothing enabled: drop what was shown and stay idle.
+    if blocking_jobs.is_empty() && async_jobs.is_empty() {
+        store.sources.set(Vec::new());
         store.updated.set(unix_ms());
-        store.busy.set(false);
-    });
+        store.pending.set(false);
+        return;
+    }
+
+    store.busy.set(true);
+    // Each source lands as soon as it answers; the last one closes the batch.
+    let left = Rc::new(Cell::new(async_jobs.len() + blocking_jobs.len()));
+    for job in async_jobs {
+        let left = Rc::clone(&left);
+        spawn(async move {
+            upsert(store, job.await);
+            finish(store, &left);
+        });
+    }
+    for job in blocking_jobs {
+        let left = Rc::clone(&left);
+        spawn(async move {
+            if let Ok(source) = job.await {
+                upsert(store, source);
+            }
+            finish(store, &left);
+        });
+    }
 }
 
-const ORDER: [&str; 3] = ["ag", "cc", "oc"];
+/// Marks one source of the current batch done; the last one ends the refresh.
+fn finish(store: Store, left: &Cell<usize>) {
+    left.set(left.get().saturating_sub(1));
+    if left.get() > 0 {
+        return;
+    }
+    prune(store);
+    store.updated.set(unix_ms());
+    store.busy.set(false);
+    if store.pending.get() {
+        refresh(store);
+    }
+}
 
-/// Replaces one source in the list, keeping the tray order stable, and keeps
-/// the last numbers of a source that failed.
+/// Replaces one source in the list, keeping the menu bar order stable, and
+/// keeps the last numbers of a source that failed.
 fn upsert(store: Store, source: Source) {
+    // A provider turned off while its fetch was in flight stays off.
+    let Some(provider) = quota::Provider::by_short(source.short) else {
+        return;
+    };
+    if !store.config.get().enabled(provider.id) {
+        return;
+    }
     let mut sources = store.sources.get();
     let source = keep_last(sources.clone(), source);
     match sources.iter_mut().find(|s| s.short == source.short) {
         Some(slot) => *slot = source,
         None => sources.push(source),
     }
-    sources.sort_by_key(|s| {
-        ORDER
-            .iter()
-            .position(|k| *k == s.short)
-            .unwrap_or(usize::MAX)
-    });
+    sources.sort_by_key(|s| quota::Provider::position(s.short));
     store.sources.set(sources);
+}
+
+/// Drops the sources that are no longer enabled.
+fn prune(store: Store) {
+    let config = store.config.get();
+    let mut sources = store.sources.get();
+    let count = sources.len();
+    sources.retain(|source| {
+        quota::Provider::by_short(source.short).is_some_and(|provider| config.enabled(provider.id))
+    });
+    if sources.len() != count {
+        store.sources.set(sources);
+    }
 }
 
 fn keep_last(previous: Vec<Source>, mut source: Source) -> Source {
@@ -155,33 +233,90 @@ fn keep_last(previous: Vec<Source>, mut source: Source) -> Source {
 }
 
 fn tray_runs(store: Store) -> Vec<TrayTitleRun> {
+    let config = store.config.get();
+    let sources = store.sources.get();
     let mut runs = Vec::new();
-    for (index, source) in store.sources.get().iter().enumerate() {
-        if index > 0 {
+    for provider in quota::PROVIDERS
+        .iter()
+        .filter(|provider| config.enabled(provider.id))
+    {
+        if !runs.is_empty() {
             runs.push(TrayTitleRun::new("  "));
         }
-        match source.headline() {
+        let source = sources.iter().find(|source| source.short == provider.short);
+        match source.and_then(Source::headline) {
             Some(remaining) => {
                 runs.push(TrayTitleRun::new(format!(
                     "{} {:.0}%",
-                    source.short, remaining
+                    provider.short, remaining
                 )));
             }
-            None => runs.push(TrayTitleRun::new(source.short.to_owned())),
+            None => runs.push(TrayTitleRun::new(provider.short.to_owned())),
         }
+    }
+    // An empty title would leave no menu bar item to click.
+    if runs.is_empty() {
+        runs.push(TrayTitleRun::new("额度"));
     }
     runs
 }
 
+/// `ag · cc`, for the footer and the tooltip.
+fn enabled_shorts(config: &config::Config) -> String {
+    let shorts: Vec<&str> = quota::PROVIDERS
+        .iter()
+        .filter(|provider| config.enabled(provider.id))
+        .map(|provider| provider.short)
+        .collect();
+    if shorts.is_empty() {
+        "未选择来源".to_owned()
+    } else {
+        shorts.join(" · ")
+    }
+}
+
+fn provider_menu(store: Store) -> MenuItem {
+    let config = store.config.get();
+    MenuItem::submenu(
+        "显示",
+        quota::PROVIDERS
+            .iter()
+            .map(|provider| {
+                let on = config.enabled(provider.id);
+                MenuItem::new(provider.title)
+                    .checked(on)
+                    .on_select(move || set_provider(store, provider.id, !on))
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Turns one provider on or off, saves the choice, and updates what shows.
+fn set_provider(store: Store, id: &'static str, on: bool) {
+    let mut config = store.config.get();
+    config.set_enabled(id, on);
+    if let Err(error) = config.save() {
+        eprintln!("[quota-bar] config: {error}");
+    }
+    store.config.set(config);
+    if on {
+        refresh(store);
+    } else {
+        prune(store);
+    }
+}
+
 fn set_tray_menu(store: Store) {
+    let config = store.config.get();
     set_tray(
         tray()
             .icon("data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%271%27 height=%271%27/%3E")
             .title(tray_runs(store))
-            .tooltip("AI 额度：ag / cc / oc")
+            .tooltip(format!("AI 额度：{}", enabled_shorts(&config)))
             .on_click(move |event| toggle_panel(store, event.bounds, false))
             .menu([
                 MenuItem::new("刷新").on_select(move || refresh(store)),
+                provider_menu(store),
                 MenuItem::new("面板").on_select(move || toggle_panel(store, None, false)),
                 MenuItem::separator(),
                 MenuItem::new("退出").on_select(quit),
@@ -217,6 +352,16 @@ fn close_panel() {
     }
 }
 
+/// Tall enough for one card per enabled provider, never taller than before.
+fn panel_height(store: Store) -> f32 {
+    let config = store.config.get();
+    let count = quota::PROVIDERS
+        .iter()
+        .filter(|provider| config.enabled(provider.id))
+        .count();
+    (104.0 + count as f32 * 184.0).clamp(220.0, PANEL_MAX_HEIGHT)
+}
+
 fn open_panel(store: Store, bounds: Option<Bounds<Points>>, _pinned: bool) {
     let position = bounds.map(|icon| {
         let x = icon.origin.x.0 + icon.size.width.0 / 2.0 - PANEL_WIDTH / 2.0;
@@ -236,7 +381,7 @@ fn open_panel(store: Store, bounds: Option<Bounds<Points>>, _pinned: bool) {
         .id("panel")
         .kind(WindowKind::Popup)
         .attributes(glass_attributes())
-        .default_size(size(px(PANEL_WIDTH), px(PANEL_HEIGHT)))
+        .default_size(size(px(PANEL_WIDTH), px(panel_height(store))))
         .content(move || panel(store));
     if let Some(position) = debug_at.or(position) {
         builder = builder.default_position(position);
@@ -324,7 +469,7 @@ fn panel(store: Store) -> impl IntoElement {
                     )),
             ),
         )
-        .child(footer())
+        .child(footer(store))
 }
 
 fn header(store: Store) -> impl IntoElement {
@@ -488,7 +633,7 @@ fn metric_row(metric: &quota::Metric) -> impl IntoElement {
         )
 }
 
-fn footer() -> impl IntoElement {
+fn footer(store: Store) -> impl IntoElement {
     view()
         .flex_row()
         .items_center()
@@ -499,7 +644,7 @@ fn footer() -> impl IntoElement {
         .border_t(px(1.0))
         .border_color(move || theme().border)
         .child(
-            text("ag · cc · oc")
+            text(move || enabled_shorts(&store.config.get()))
                 .text_size(px(10.0))
                 .text_color(move || theme().muted_foreground),
         )
@@ -534,6 +679,23 @@ mod tests {
         let mut source = quota::Source::empty("ag", "Antigravity");
         source.metrics = vec![metric(Some(80.0)), metric(Some(12.0)), metric(None)];
         assert_eq!(source.headline(), Some(12.0));
+    }
+
+    #[test]
+    fn every_provider_has_a_unique_id_and_place() {
+        let ids: std::collections::HashSet<_> = quota::PROVIDERS
+            .iter()
+            .map(|provider| provider.id)
+            .collect();
+        assert_eq!(ids.len(), quota::PROVIDERS.len());
+
+        for (index, provider) in quota::PROVIDERS.iter().enumerate() {
+            assert_eq!(quota::Provider::position(provider.short), index);
+            assert_eq!(
+                quota::Provider::by_short(provider.short).map(|found| found.id),
+                Some(provider.id)
+            );
+        }
     }
 
     #[test]

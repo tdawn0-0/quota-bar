@@ -17,9 +17,18 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use nsh_core::prelude::data_dir;
 use serde_json::{Map, Value, json};
+
+/// What the file said when we last read or wrote it, so a running app can
+/// tell the user's edit from its own write.
+static SEEN: Mutex<Option<String>> = Mutex::new(None);
+
+fn seen() -> std::sync::MutexGuard<'static, Option<String>> {
+    SEEN.lock().unwrap_or_else(|error| error.into_inner())
+}
 
 /// Which providers are on, by provider id. Missing ids are enabled.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -43,10 +52,47 @@ impl Config {
         let Some(path) = path() else {
             return Ok(Self::default());
         };
-        match std::fs::read_to_string(&path) {
-            Ok(text) => Self::parse(&text).map_err(|error| format!("{}: {error}", path.display())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(format!("{}: {error}", path.display())),
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                *seen() = None;
+                return Ok(Self::default());
+            }
+            Err(error) => return Err(format!("{}: {error}", path.display())),
+        };
+        let config = Self::parse(&text).map_err(|error| format!("{}: {error}", path.display()));
+        *seen() = Some(text);
+        config
+    }
+
+    /// Reads the file again, but only when someone else changed it: the
+    /// app's own writes are already in `current`. A missing or broken file
+    /// leaves `current` as it is.
+    pub fn reload(current: &Self) -> Self {
+        let Some(path) = path() else {
+            return current.clone();
+        };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return current.clone(),
+            Err(error) => {
+                eprintln!("[quota-bar] {}: {error}", path.display());
+                return current.clone();
+            }
+        };
+        if seen().as_deref() == Some(text.as_str()) {
+            return current.clone();
+        }
+        match Self::parse(&text) {
+            Ok(config) => {
+                *seen() = Some(text);
+                config
+            }
+            Err(error) => {
+                eprintln!("[quota-bar] {}: {error}", path.display());
+                *seen() = Some(text);
+                current.clone()
+            }
         }
     }
 
@@ -56,8 +102,13 @@ impl Config {
         if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
-        let text = serde_json::to_string_pretty(&self.to_json()).map_err(|e| e.to_string())?;
-        std::fs::write(&path, format!("{text}\n")).map_err(|e| format!("{}: {e}", path.display()))
+        let text = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&self.to_json()).map_err(|e| e.to_string())?
+        );
+        std::fs::write(&path, &text).map_err(|e| format!("{}: {e}", path.display()))?;
+        *seen() = Some(text);
+        Ok(())
     }
 
     fn to_json(&self) -> Value {
@@ -138,11 +189,10 @@ mod tests {
             Config::parse(r#"{"providers":{}}"#).unwrap(),
             Config::default()
         );
-        assert_eq!(
+        assert!(
             Config::parse(r#"{"providers":{"claude":{"enabled":true}}}"#)
                 .unwrap()
-                .enabled("opencode"),
-            true
+                .enabled("opencode")
         );
     }
 
