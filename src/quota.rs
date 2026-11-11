@@ -146,6 +146,27 @@ fn home(relative: &str) -> String {
     format!("{dir}/{relative}")
 }
 
+/// Where a CLI usually lives, for a GUI app launched with a small `PATH`.
+/// The bare name lets `Command` fall back to `PATH`.
+fn program(name: &str) -> String {
+    let candidates = [
+        home(&format!(".local/bin/{name}")),
+        format!("/opt/homebrew/bin/{name}"),
+        format!("/usr/local/bin/{name}"),
+        format!("/usr/bin/{name}"),
+        home(&format!(".npm-global/bin/{name}")),
+        home(&format!(".bun/bin/{name}")),
+        home(&format!(".volta/bin/{name}")),
+        home(&format!(".local/share/pnpm/{name}")),
+    ];
+    for candidate in candidates {
+        if std::path::Path::new(&candidate).is_file() {
+            return candidate;
+        }
+    }
+    name.to_owned()
+}
+
 /// Seconds until `timestamp` (RFC 3339), said as `2 天 15 小时后重置`.
 fn reset_in(timestamp: &str, now_ms: u64) -> String {
     let Some(at) = parse_rfc3339(timestamp) else {
@@ -237,7 +258,7 @@ pub fn antigravity(now_ms: u64) -> Source {
 }
 
 fn collect_antigravity(now_ms: u64) -> Result<(Vec<Metric>, String), String> {
-    let agy = home(".local/bin/agy");
+    let agy = program("agy");
     let quota = run(&agy, &["-p", "/quota", "--output-format", "json"])?;
     let quota: Value = serde_json::from_str(&quota).map_err(|e| format!("agy: {e}"))?;
     if quota.get("status").and_then(Value::as_str) != Some("SUCCESS") {
@@ -325,7 +346,7 @@ pub fn claude() -> Source {
 }
 
 fn collect_claude() -> Result<(Vec<Metric>, String), String> {
-    let claude = home(".local/bin/claude");
+    let claude = program("claude");
     let text = run(&claude, &["-p", "/usage", "--output-format", "json"])?;
     let envelope: Value = serde_json::from_str(&text).map_err(|e| format!("claude: {e}"))?;
     let body = envelope.get("result").and_then(Value::as_str).unwrap_or("");
@@ -752,16 +773,7 @@ fn codex_program() -> String {
     {
         return path;
     }
-    for candidate in [
-        home(".local/bin/codex"),
-        "/opt/homebrew/bin/codex".to_owned(),
-        "/usr/local/bin/codex".to_owned(),
-    ] {
-        if std::path::Path::new(&candidate).exists() {
-            return candidate;
-        }
-    }
-    "codex".to_owned()
+    program("codex")
 }
 
 // ---------------------------------------------------------------- opencode
@@ -833,7 +845,7 @@ fn opencode_key() -> Result<String, String> {
             return Ok(key.trim().to_owned());
         }
     }
-    let exported = run("opencode", &["auth", "export"])?;
+    let exported = run(&program("opencode"), &["auth", "export"])?;
     let creds: Value =
         serde_json::from_str(&exported).map_err(|e| format!("opencode auth: {e}"))?;
     let empty = Vec::new();

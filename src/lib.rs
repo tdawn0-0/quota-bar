@@ -30,6 +30,13 @@ const BLUE: u32 = 0x0a84ff;
 const AMBER: u32 = 0xff9f0a;
 const RED: u32 = 0xff3b30;
 
+/// The menu bar item's picture. On macOS its title carries the item, so a
+/// 1×1 transparent icon leaves it text-only; Linux needs a visible icon.
+#[cfg(target_os = "macos")]
+const TRAY_ICON: &str = "data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%271%27 height=%271%27/%3E";
+#[cfg(target_os = "linux")]
+const TRAY_ICON: &str = "data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Crect x=%272.5%27 y=%279%27 width=%272.5%27 height=%275%27 rx=%271%27/%3E%3Crect x=%276.75%27 y=%275.5%27 width=%272.5%27 height=%278.5%27 rx=%271%27/%3E%3Crect x=%2711%27 y=%272%27 width=%272.5%27 height=%2712%27 rx=%271%27/%3E%3C/svg%3E";
+
 thread_local! {
     /// The open panel, so a second tray click closes it.
     static PANEL: RefCell<Option<WindowRef>> = const { RefCell::new(None) };
@@ -46,6 +53,9 @@ struct Store {
     /// Set when a refresh was asked for while one was running.
     pending: Signal<bool>,
     config: Signal<config::Config>,
+    /// Linux tray hosts can miss a label set before they start; the label is
+    /// sent once more after startup.
+    tray_ready: Signal<bool>,
 }
 
 #[native_module("quota-bar/native")]
@@ -64,12 +74,18 @@ pub fn App() -> impl IntoElement {
             eprintln!("[quota-bar] config: {error}; showing every provider");
             config::Config::default()
         })),
+        tray_ready: signal(cfg!(not(target_os = "linux"))),
     };
 
     // One fetch at launch, then only on demand.
     refresh(store);
 
     effect(move || set_tray_menu(store));
+
+    // GNOME's AppIndicator extension can miss the first label; sending an
+    // empty one first and the real one shortly after makes it show.
+    #[cfg(target_os = "linux")]
+    set_timeout(Duration::from_secs(2), move || store.tray_ready.set(true));
 
     // Switching to another app closes the panel. The delay lets the
     // activation that follows a tray click land first.
@@ -233,6 +249,9 @@ fn keep_last(previous: Vec<Source>, mut source: Source) -> Source {
 }
 
 fn tray_runs(store: Store) -> Vec<TrayTitleRun> {
+    if !store.tray_ready.get() {
+        return Vec::new();
+    }
     let config = store.config.get();
     let sources = store.sources.get();
     let mut runs = Vec::new();
@@ -310,7 +329,7 @@ fn set_tray_menu(store: Store) {
     let config = store.config.get();
     set_tray(
         tray()
-            .icon("data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%271%27 height=%271%27/%3E")
+            .icon(TRAY_ICON)
             .title(tray_runs(store))
             .tooltip(format!("AI 额度：{}", enabled_shorts(&config)))
             .on_click(move |event| toggle_panel(store, event.bounds, false))

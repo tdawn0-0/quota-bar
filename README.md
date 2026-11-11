@@ -1,8 +1,8 @@
 # Quota Bar
 
-A macOS menu bar app, written in Rust with [NSH](https://nsh.dev), showing the
-remaining quota of the local AI CLIs. One menu bar item, one popup panel, no
-web view and no JavaScript runtime.
+A menu bar app for macOS and a tray app for Linux, written in Rust with
+[NSH](https://nsh.dev), showing the remaining quota of the local AI CLIs. One
+tray item, one popup panel, no web view and no JavaScript runtime.
 
 ```
 ag 16%  cc 78%  cx 75%  oc 93%
@@ -17,24 +17,26 @@ ag 16%  cc 78%  cx 75%  oc 93%
 
 ## Behaviour
 
-- Clicking the menu bar item toggles the panel: a second click, a click in
-  another app, or Escape closes it.
+- On macOS, clicking the menu bar item toggles the panel: a second click, a
+  click in another app, or Escape closes it. Under GNOME, clicking the tray
+  label opens its menu; its **面板** item opens the panel.
 - Opening the panel never fetches: it shows the numbers already in memory.
   Data is refreshed at launch, every five minutes, and on the refresh button.
 
 ## Providers
 
 Each provider can be shown or hidden from the tray's **显示** submenu. The
-choice is saved to `config.json` in the app's data directory, which on macOS
-is:
+choice is saved to `config.json` in the app's data directory:
 
 ```
-~/Library/Application Support/bar.jyeu.quota/config.json
+~/Library/Application Support/bar.jyeu.quota/config.json   # macOS
+~/.local/share/bar.jyeu.quota/config.json                  # Linux
 ```
 
-`QUOTA_BAR_CONFIG` overrides the path. Every provider is on unless its entry
-says otherwise, so a missing file (or a provider added by a later version)
-starts enabled:
+On Linux that is `$XDG_DATA_HOME/bar.jyeu.quota/config.json` when
+`XDG_DATA_HOME` is set. `QUOTA_BAR_CONFIG` overrides the path on either
+platform. Every provider is on unless its entry says otherwise, so a missing
+file (or a provider added by a later version) starts enabled:
 
 ```json
 {
@@ -84,15 +86,41 @@ cargo build --release
 nsh package --target macos --run   # a signed .app bundle in .nsh/out
 ```
 
-The app targets macOS only; there is no Windows backend or build.
+Windows is not supported.
+
+### Linux
+
+The Linux backend uses GTK 4, GStreamer and Pango. On Debian or Ubuntu:
+
+```sh
+sudo apt install build-essential pkg-config libgtk-4-dev \
+  libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+  libpango1.0-dev libcairo2-dev libgdk-pixbuf-2.0-dev libglib2.0-dev \
+  libxkbcommon-dev libwayland-dev libx11-dev libxi-dev libxcursor-dev
+cargo run
+```
+
+The panel's labels are Chinese; install `fonts-noto-cjk` (or another CJK font)
+if they show as boxes.
+
+A tray host for StatusNotifierItem is required. KDE, Xfce and most other
+desktops have one; GNOME needs the AppIndicator extension
+(`gnome-shell-extension-appindicator`). The label appears a moment after
+launch: GNOME's extension can miss the first one, so the app sends it again.
+
+GTK 4 has no API to place a window next to the tray icon, so the window manager
+chooses where the panel opens. The tray label and the panel itself show the
+same numbers as on macOS.
 
 Debug switches: `QUOTA_BAR_OPEN_PANEL=1` opens the panel at launch (add
 `QUOTA_BAR_PIN_PANEL=1` to keep it open for screenshots, `QUOTA_BAR_PANEL_AT=x,y`
 to place it, `QUOTA_BAR_REFRESH_SECS=15` for a faster refresh while testing).
+The panel position is macOS-only.
 
-The packaged app is a menu bar app (`macos.activationPolicy: accessory`), so it
-has no Dock icon. To start it at login, add the packaged app under System
-Settings → General → Login Items.
+The packaged macOS app is a menu bar app (`macos.activationPolicy: accessory`),
+so it has no Dock icon. To start it at login, add the packaged app under System
+Settings → General → Login Items. On Linux, start `quota-bar` from your
+desktop's autostart settings.
 
 The OpenCode key comes from `opencode auth export` at runtime; `OPENCODE_GO_KEY`
 overrides it.
@@ -102,7 +130,9 @@ overrides it.
 The panel is a rounded, translucent sheet with layered cards and a hairline top
 edge. NSH 0.5's macOS backend paints an opaque window background, so the
 translucency is drawn in-app rather than as an `NSVisualEffectView` blur; a real
-vibrancy material would need the platform layer.
+vibrancy material would need the platform layer. The Linux GTK backend draws the
+same sheet; its own translucent fill carries the look where GTK has no popover
+material.
 
 ## Layout
 
@@ -110,6 +140,6 @@ vibrancy material would need the platform layer.
 src/lib.rs     tray item, popup panel, refresh policy
 src/config.rs  which providers are on, read from and saved to config.json
 src/quota.rs   the providers, one collector each, parsing and formatting
-src/main.rs    cargo run entry (AppKit backend)
+src/main.rs    cargo run entry (AppKit / GTK 4 backend)
 nsh.json       app metadata, accessory policy, hidden main window
 ```
