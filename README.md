@@ -84,6 +84,8 @@ cargo build --release
 nsh package --target macos --run   # a signed .app bundle in .nsh/out
 ```
 
+The app targets macOS only; there is no Windows backend or build.
+
 Debug switches: `QUOTA_BAR_OPEN_PANEL=1` opens the panel at launch (add
 `QUOTA_BAR_PIN_PANEL=1` to keep it open for screenshots, `QUOTA_BAR_PANEL_AT=x,y`
 to place it, `QUOTA_BAR_REFRESH_SECS=15` for a faster refresh while testing).

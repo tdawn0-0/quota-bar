@@ -25,6 +25,3 @@ nsh-platform-linux = { version = "0.5.0", default-features = false, features = [
 
 [target.'cfg(target_os = "macos")'.dependencies]
 nsh-platform-macos = { version = "0.5.0", default-features = false, features = [] }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-nsh-platform-windows = { version = "0.5.0", default-features = false, features = [] }
