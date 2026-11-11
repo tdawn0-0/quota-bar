@@ -1,0 +1,54 @@
+# Quota Bar
+
+A macOS menu bar app, written in Rust with [NSH](https://nsh.dev), showing the
+remaining quota of the local AI CLIs. One menu bar item, one popup panel, no
+web view and no JavaScript runtime.
+
+```
+ag 16%  cc 78%  oc 93%
+```
+
+| Source | How it reads the quota |
+| --- | --- |
+| Antigravity (`ag`) | `agy -p "/quota" --output-format json`, plus `agy -p "/credits"` for the credit balance |
+| Claude Code (`cc`) | `claude -p "/usage" --output-format json`, parsed from the CLI's own summary; remaining = 100 − used |
+| OpenCode Go (`oc`) | `GET https://opencode.ai/zen/go/v1/usage` with the stored `oc_sk_…` key; `percent` is used, shown as remaining |
+
+## Resource budget
+
+The point of writing this in Rust is that an idle app should be close to free.
+
+- **No background polling.** Data is fetched at launch, when the panel is opened
+  after two minutes, and when the refresh control or menu item asks. An idle
+  app sleeps at 0% CPU.
+- Batches run concurrently, each one CLI process at a time, with no shell.
+- One window, created only while the panel is open; the main window starts
+  hidden (`nsh.json` `window.defaultVisible: false`) and never shows.
+- The popup closes on blur, so the window's memory is released after use.
+
+## Build and run
+
+```sh
+cargo run                          # development build, logs in the terminal
+QUOTA_BAR_OPEN_PANEL=1 cargo run   # opens the panel at launch, for screenshots
+cargo test                         # collectors' parsing logic
+
+cargo build --release
+nsh package --target macos --run   # a signed .app bundle in .nsh/out
+```
+
+The packaged app is a menu bar app (`macos.activationPolicy: accessory`), so it
+has no Dock icon. To start it at login, add the packaged app under System
+Settings → General → Login Items.
+
+The OpenCode key comes from `opencode auth export` at runtime; `OPENCODE_GO_KEY`
+overrides it.
+
+## Layout
+
+```
+src/lib.rs     tray item, popup panel, refresh policy
+src/quota.rs   one collector per source, parsing and formatting
+src/main.rs    cargo run entry (AppKit backend)
+nsh.json       app metadata, accessory policy, hidden main window
+```

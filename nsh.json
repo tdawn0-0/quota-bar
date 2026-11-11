@@ -1,0 +1,17 @@
+{
+  "name": "Quota Bar",
+  "id": "bar.jyeu.quota",
+  "version": "1.0.0",
+  "build": 1,
+  "rust": ".",
+  "root": "App",
+  "appearance": "system",
+  "macos": {
+    "activationPolicy": "accessory"
+  },
+  "window": {
+    "defaultVisible": false,
+    "defaultSize": { "width": 360, "height": 520 },
+    "titleBar": { "style": "hidden" }
+  }
+}

@@ -1,0 +1,29 @@
+[package]
+name = "quota-bar"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+nsh-core = "0.5.0"
+serde_json = "1"
+nsh-base = "0.5.0"
+env_logger = "0.11"
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"
+opt-level = "z"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nsh-platform-linux = { version = "0.5.0", default-features = false, features = [] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nsh-platform-macos = { version = "0.5.0", default-features = false, features = [] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+nsh-platform-windows = { version = "0.5.0", default-features = false, features = [] }
