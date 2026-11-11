@@ -5,13 +5,14 @@ remaining quota of the local AI CLIs. One menu bar item, one popup panel, no
 web view and no JavaScript runtime.
 
 ```
-ag 16%  cc 78%  oc 93%
+ag 16%  cc 78%  cx 75%  oc 93%
 ```
 
 | Source | How it reads the quota |
 | --- | --- |
 | Antigravity (`ag`) | `agy -p "/quota" --output-format json`, plus `agy -p "/credits"` for the credit balance |
 | Claude Code (`cc`) | `claude -p "/usage" --output-format json`, parsed from the CLI's own summary; remaining = 100 − used |
+| Codex (`cx`) | `GET https://chatgpt.com/backend-api/wham/usage` with the ChatGPT login in `~/.codex/auth.json`; a stale login falls back to `codex app-server`, which refreshes it without a model turn |
 | OpenCode Go (`oc`) | `GET https://opencode.ai/zen/go/v1/usage` with the stored `oc_sk_…` key; `percent` is used, shown as remaining |
 
 ## Behaviour
@@ -40,6 +41,7 @@ starts enabled:
   "providers": {
     "antigravity": true,
     "claude": true,
+    "codex": true,
     "opencode": false
   }
 }
@@ -54,6 +56,10 @@ An entry can also be an object, which leaves room for provider settings later:
 Edits to the file take effect on the next refresh (the refresh button or menu
 item, otherwise within five minutes). Hidden providers are neither fetched nor
 shown in the menu bar and panel.
+
+Codex never starts a model turn: its quota comes from the usage endpoint with
+the stored ChatGPT login, and only a stale login falls back to the local app
+server to refresh it.
 
 To add a provider, add its collector in `src/quota.rs` and one entry to
 `PROVIDERS` there; the tray menu, config file and footer pick it up.
@@ -73,17 +79,14 @@ The point of writing this in Rust is that an idle app should be close to free.
 
 ```sh
 cargo run                          # development build, logs in the terminal
-cargo test                         # collectors' parsing logic
+cargo test                         # providers' parsing logic
+cargo build --release
+nsh package --target macos --run   # a signed .app bundle in .nsh/out
 ```
 
 Debug switches: `QUOTA_BAR_OPEN_PANEL=1` opens the panel at launch (add
 `QUOTA_BAR_PIN_PANEL=1` to keep it open for screenshots, `QUOTA_BAR_PANEL_AT=x,y`
 to place it, `QUOTA_BAR_REFRESH_SECS=15` for a faster refresh while testing).
-
-
-cargo build --release
-nsh package --target macos --run   # a signed .app bundle in .nsh/out
-```
 
 The packaged app is a menu bar app (`macos.activationPolicy: accessory`), so it
 has no Dock icon. To start it at login, add the packaged app under System
