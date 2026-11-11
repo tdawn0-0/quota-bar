@@ -14,13 +14,19 @@ ag 16%  cc 78%  oc 93%
 | Claude Code (`cc`) | `claude -p "/usage" --output-format json`, parsed from the CLI's own summary; remaining = 100 − used |
 | OpenCode Go (`oc`) | `GET https://opencode.ai/zen/go/v1/usage` with the stored `oc_sk_…` key; `percent` is used, shown as remaining |
 
+## Behaviour
+
+- Clicking the menu bar item toggles the panel: a second click, a click in
+  another app, or Escape closes it.
+- Opening the panel never fetches: it shows the numbers already in memory.
+  Data is refreshed at launch, every five minutes, and on the refresh button.
+
 ## Resource budget
 
 The point of writing this in Rust is that an idle app should be close to free.
 
-- **No background polling.** Data is fetched at launch, when the panel is opened
-  after two minutes, and when the refresh control or menu item asks. An idle
-  app sleeps at 0% CPU.
+- **One timer, no busy loop.** Data is fetched at launch, every five minutes,
+  and when the refresh control asks. An idle app sleeps at 0% CPU.
 - Batches run concurrently, each one CLI process at a time, with no shell.
 - One window, created only while the panel is open; the main window starts
   hidden (`nsh.json` `window.defaultVisible: false`) and never shows.
@@ -30,8 +36,13 @@ The point of writing this in Rust is that an idle app should be close to free.
 
 ```sh
 cargo run                          # development build, logs in the terminal
-QUOTA_BAR_OPEN_PANEL=1 cargo run   # opens the panel at launch, for screenshots
 cargo test                         # collectors' parsing logic
+```
+
+Debug switches: `QUOTA_BAR_OPEN_PANEL=1` opens the panel at launch (add
+`QUOTA_BAR_PIN_PANEL=1` to keep it open for screenshots, `QUOTA_BAR_PANEL_AT=x,y`
+to place it, `QUOTA_BAR_REFRESH_SECS=15` for a faster refresh while testing).
+
 
 cargo build --release
 nsh package --target macos --run   # a signed .app bundle in .nsh/out
@@ -43,6 +54,13 @@ Settings → General → Login Items.
 
 The OpenCode key comes from `opencode auth export` at runtime; `OPENCODE_GO_KEY`
 overrides it.
+
+## Look
+
+The panel is a rounded, translucent sheet with layered cards and a hairline top
+edge. NSH 0.5's macOS backend paints an opaque window background, so the
+translucency is drawn in-app rather than as an `NSVisualEffectView` blur; a real
+vibrancy material would need the platform layer.
 
 ## Layout
 

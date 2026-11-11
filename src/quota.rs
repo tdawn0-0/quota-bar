@@ -57,8 +57,16 @@ fn run(program: &str, args: &[&str]) -> Result<String, String> {
         let line = detail.lines().last().unwrap_or("").trim().to_owned();
         return Err(format!(
             "{program}: exited {}{}",
-            output.status.code().map(|c| c.to_string()).unwrap_or_default(),
-            if line.is_empty() { String::new() } else { format!(" ({line})") }
+            output
+                .status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_default(),
+            if line.is_empty() {
+                String::new()
+            } else {
+                format!(" ({line})")
+            }
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -96,9 +104,7 @@ fn parse_rfc3339(text: &str) -> Option<i64> {
     if bytes.len() < 20 || bytes[4] != b'-' || bytes[7] != b'-' {
         return None;
     }
-    let num = |from: usize, len: usize| -> Option<i64> {
-        text.get(from..from + len)?.parse().ok()
-    };
+    let num = |from: usize, len: usize| -> Option<i64> { text.get(from..from + len)?.parse().ok() };
     let (year, month, day) = (num(0, 4)?, num(5, 2)? as u32, num(8, 2)? as u32);
     let (hour, minute, second) = (num(11, 2)?, num(14, 2)?, num(17, 2)?);
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
@@ -107,7 +113,11 @@ fn parse_rfc3339(text: &str) -> Option<i64> {
     let mut rest = 19;
     if text.get(rest..rest + 1) == Some(".") {
         rest += 1;
-        while text.as_bytes().get(rest).is_some_and(|b| b.is_ascii_digit()) {
+        while text
+            .as_bytes()
+            .get(rest)
+            .is_some_and(|b| b.is_ascii_digit())
+        {
             rest += 1;
         }
     }
@@ -164,7 +174,10 @@ fn collect_antigravity(now_ms: u64) -> Result<(Vec<Metric>, String), String> {
     if quota.get("status").and_then(Value::as_str) != Some("SUCCESS") {
         return Err(format!(
             "agy: status {}",
-            quota.get("status").and_then(Value::as_str).unwrap_or("unknown")
+            quota
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
         ));
     }
 
@@ -181,14 +194,24 @@ fn collect_antigravity(now_ms: u64) -> Result<(Vec<Metric>, String), String> {
         } else {
             "3P "
         };
-        for bucket in group.get("buckets").and_then(Value::as_array).unwrap_or(&empty) {
-            let disabled = bucket.get("disabled").and_then(Value::as_bool).unwrap_or(false);
+        for bucket in group
+            .get("buckets")
+            .and_then(Value::as_array)
+            .unwrap_or(&empty)
+        {
+            let disabled = bucket
+                .get("disabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let remaining = bucket
                 .get("remaining_fraction")
                 .and_then(Value::as_f64)
                 .map(|f| f * 100.0);
             let window = bucket.get("window").and_then(Value::as_str).unwrap_or("");
-            let reset = bucket.get("reset_time").and_then(Value::as_str).unwrap_or("");
+            let reset = bucket
+                .get("reset_time")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             metrics.push(Metric {
                 label: format!("{short}{}", window_label(window)),
                 remaining: if disabled { None } else { remaining },
@@ -207,7 +230,11 @@ fn collect_antigravity(now_ms: u64) -> Result<(Vec<Metric>, String), String> {
     let credits = run(&agy, &["-p", "/credits", "--output-format", "json"])
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .and_then(|value| value.pointer("/command/data/remaining_credits").and_then(Value::as_i64))
+        .and_then(|value| {
+            value
+                .pointer("/command/data/remaining_credits")
+                .and_then(Value::as_i64)
+        })
         .map(|credits| format!("AI credits {credits}"))
         .unwrap_or_default();
 
@@ -233,7 +260,11 @@ fn collect_claude() -> Result<(Vec<Metric>, String), String> {
     let text = run(&claude, &["-p", "/usage", "--output-format", "json"])?;
     let envelope: Value = serde_json::from_str(&text).map_err(|e| format!("claude: {e}"))?;
     let body = envelope.get("result").and_then(Value::as_str).unwrap_or("");
-    if envelope.get("is_error").and_then(Value::as_bool).unwrap_or(false) {
+    if envelope
+        .get("is_error")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
         return Err(format!("claude: {}", body.trim()));
     }
 
@@ -266,7 +297,11 @@ fn collect_claude() -> Result<(Vec<Metric>, String), String> {
         metrics.push(Metric {
             label,
             remaining: used.map(|used| (100.0 - used).max(0.0)),
-            detail: if reset.is_empty() { String::new() } else { format!("重置 {reset}") },
+            detail: if reset.is_empty() {
+                String::new()
+            } else {
+                format!("重置 {reset}")
+            },
         });
     }
     if metrics.is_empty() {
@@ -351,10 +386,14 @@ fn opencode_key() -> Result<String, String> {
         }
     }
     let exported = run("opencode", &["auth", "export"])?;
-    let creds: Value = serde_json::from_str(&exported).map_err(|e| format!("opencode auth: {e}"))?;
+    let creds: Value =
+        serde_json::from_str(&exported).map_err(|e| format!("opencode auth: {e}"))?;
     let empty = Vec::new();
     for cred in creds.as_array().unwrap_or(&empty) {
-        let integration = cred.get("integrationID").and_then(Value::as_str).unwrap_or("");
+        let integration = cred
+            .get("integrationID")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         if !integration.contains("opencode") {
             continue;
         }
@@ -379,7 +418,13 @@ fn local_stamp(timestamp: &str) -> String {
     let days = shifted.div_euclid(86_400);
     let rem = shifted.rem_euclid(86_400);
     let (_, month, day) = civil_from_days(days);
-    format!("{:02}-{:02} {:02}:{:02}", month, day, rem / 3600, (rem % 3600) / 60)
+    format!(
+        "{:02}-{:02} {:02}:{:02}",
+        month,
+        day,
+        rem / 3600,
+        (rem % 3600) / 60
+    )
 }
 
 fn civil_from_days(days: i64) -> (i64, u32, u32) {
