@@ -1,5 +1,7 @@
 //! Quota collectors: each source runs its CLI or API and returns display rows.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::process::Command;
 
 use nsh_core::prelude::{HttpRequest, fetch};
@@ -41,6 +43,63 @@ impl Source {
             .iter()
             .filter_map(|m| m.remaining)
             .reduce(f64::min)
+    }
+}
+
+// --------------------------------------------------------------- providers
+
+/// One source the app knows how to read.
+pub struct Provider {
+    /// Stable id in the config file; it never changes.
+    pub id: &'static str,
+    /// Two-letter label used in the menu bar.
+    pub short: &'static str,
+    pub title: &'static str,
+    pub kind: Kind,
+}
+
+/// How a provider gets its numbers.
+pub enum Kind {
+    /// Runs a CLI, which blocks its thread until it answers.
+    Blocking(fn(u64) -> Source),
+    /// Fetches over the network.
+    Async(fn() -> Pin<Box<dyn Future<Output = Source>>>),
+}
+
+/// Every provider in the order the menu bar and the panel show them. Adding
+/// one here is all it takes for the config file and the menu to know it.
+pub const PROVIDERS: &[Provider] = &[
+    Provider {
+        id: "antigravity",
+        short: "ag",
+        title: "Antigravity",
+        kind: Kind::Blocking(antigravity),
+    },
+    Provider {
+        id: "claude",
+        short: "cc",
+        title: "Claude Code",
+        kind: Kind::Blocking(claude),
+    },
+    Provider {
+        id: "opencode",
+        short: "oc",
+        title: "OpenCode Go",
+        kind: Kind::Async(|| Box::pin(opencode())),
+    },
+];
+
+impl Provider {
+    pub fn by_short(short: &str) -> Option<&'static Self> {
+        PROVIDERS.iter().find(|provider| provider.short == short)
+    }
+
+    /// Its place in the menu bar and the panel.
+    pub fn position(short: &str) -> usize {
+        PROVIDERS
+            .iter()
+            .position(|provider| provider.short == short)
+            .unwrap_or(usize::MAX)
     }
 }
 

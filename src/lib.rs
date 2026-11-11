@@ -31,6 +31,8 @@ const RED: u32 = 0xff3b30;
 thread_local! {
     /// The open panel, so a second tray click closes it.
     static PANEL: RefCell<Option<WindowRef>> = const { RefCell::new(None) };
+    /// When it opened, so activation that arrives late does not close it.
+    static OPENED_AT: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
 }
 
 /// The three signals the app shares between its tray handler and its panel.
@@ -59,11 +61,18 @@ pub fn App() -> impl IntoElement {
 
     effect(move || set_tray_menu(store));
 
-    // Switching to another app closes the panel, as a menu bar extra should.
+    // Switching to another app closes the panel. The delay lets the
+    // activation that follows a tray click land first.
     effect(move || {
-        if lifecycle() != Lifecycle::Active {
-            close_panel();
+        if lifecycle() == Lifecycle::Active {
+            return;
         }
+        set_timeout(Duration::from_millis(400), move || {
+            let age = unix_ms() - OPENED_AT.with(|at| at.get());
+            if lifecycle() != Lifecycle::Active && age > 900.0 {
+                close_panel();
+            }
+        });
     });
 
     // Steady background refresh; opening the panel only reads what is there.
@@ -184,7 +193,8 @@ fn glass_attributes() -> WindowAttributes {
     let mut attributes = WindowAttributes::default();
     attributes.transparent = Some(true);
     attributes.backdrop = Some(nsh_core::desktop::Backdrop::Popover);
-    attributes.close_on_blur = Some(false);
+    attributes.close_on_blur = Some(true);
+    attributes.activate = Some(true);
     attributes
 }
 
@@ -207,19 +217,12 @@ fn close_panel() {
     }
 }
 
-fn open_panel(store: Store, bounds: Option<Bounds<Points>>, pinned: bool) {
+fn open_panel(store: Store, bounds: Option<Bounds<Points>>, _pinned: bool) {
     let position = bounds.map(|icon| {
         let x = icon.origin.x.0 + icon.size.width.0 / 2.0 - PANEL_WIDTH / 2.0;
         let y = icon.origin.y.0 + icon.size.height.0 + 6.0;
         WindowPosition::At(point(px(x.max(8.0)), px(y)))
     });
-
-    // The panel draws its own rounded corners on a transparent window, the
-    // way a popover looks next to the menu bar.
-    let mut attributes = WindowAttributes::default();
-    attributes.transparent = Some(true);
-    attributes.close_on_blur = Some(!pinned);
-    attributes.activate = Some(true);
 
     let debug_at = std::env::var("QUOTA_BAR_PANEL_AT").ok().and_then(|value| {
         let (x, y) = value.split_once(',')?;
@@ -241,6 +244,7 @@ fn open_panel(store: Store, bounds: Option<Bounds<Points>>, pinned: bool) {
     match open_window(builder) {
         Some(panel) => {
             PANEL.with(|slot| *slot.borrow_mut() = Some(panel.clone()));
+            OPENED_AT.with(|at| at.set(unix_ms()));
             panel.focus();
             // macOS may turn the first activation down; asking again once the
             // window exists takes the keyboard from the app in front.
