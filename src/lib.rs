@@ -58,6 +58,9 @@ struct Store {
     config: Signal<config::Config>,
     /// A pinned panel stays open when another app comes forward.
     pinned: Signal<bool>,
+    /// Bumped whenever `sources` changes. A window's content is made once,
+    /// so the open panel's cards follow this instead of the list itself.
+    revision: Signal<u64>,
     /// Linux tray hosts can miss a label set before they start; the label is
     /// sent once more after startup.
     #[cfg(target_os = "linux")]
@@ -78,6 +81,7 @@ pub fn App() -> impl IntoElement {
         pending: signal(false),
         config: signal(load_config()),
         pinned: signal(false),
+        revision: signal(0_u64),
         #[cfg(target_os = "linux")]
         tray_ready: signal(false),
     };
@@ -200,7 +204,7 @@ fn refresh(store: Store) {
 
     // Nothing enabled: drop what was shown and stay idle.
     if blocking_jobs.is_empty() && async_jobs.is_empty() {
-        store.sources.set(Vec::new());
+        set_sources(store, Vec::new());
         store.updated.set(unix_ms());
         store.pending.set(false);
         return;
@@ -258,7 +262,7 @@ fn upsert(store: Store, source: Source) {
         None => sources.push(source),
     }
     sources.sort_by_key(|s| quota::Provider::position(s.short));
-    store.sources.set(sources);
+    set_sources(store, sources);
 }
 
 /// Drops the sources that are no longer enabled.
@@ -270,8 +274,16 @@ fn prune(store: Store) {
         quota::Provider::by_short(source.short).is_some_and(|provider| config.enabled(provider.id))
     });
     if sources.len() != count {
-        store.sources.set(sources);
+        set_sources(store, sources);
     }
+}
+
+/// Replaces the list, and tells an open panel to rebuild its cards.
+fn set_sources(store: Store, sources: Vec<Source>) {
+    store.sources.set(sources);
+    store
+        .revision
+        .update(|revision| *revision = revision.wrapping_add(1));
 }
 
 fn keep_last(previous: Vec<Source>, mut source: Source) -> Source {
@@ -595,9 +607,9 @@ fn value_color(remaining: Option<f64>) -> AdaptiveColor {
 }
 
 fn panel(store: Store) -> impl IntoElement {
-    // Read the list here, not only in the rows: an open panel must rebuild
-    // when a fetch lands, and the row signals alone did not repaint it.
-    let sources = store.sources.get();
+    // A window's content is made once: plain elements would keep the cards
+    // from the moment it opened. The cards live in a reactive region keyed
+    // on the list's revision, so every fetch that lands rebuilds them.
     view()
         .flex_1()
         .flex_col()
@@ -618,7 +630,17 @@ fn panel(store: Store) -> impl IntoElement {
                     .gap(px(8.0))
                     .px(px(12.0))
                     .pb(px(12.0))
-                    .children(sources.into_iter().map(card)),
+                    .child(each(
+                        move || vec![store.revision.get()],
+                        |revision| *revision,
+                        move |_, _| {
+                            view()
+                                .flex_col()
+                                .w_full()
+                                .gap(px(8.0))
+                                .children(store.sources.get().into_iter().map(card))
+                        },
+                    )),
             ),
         )
         .child(footer(store))
