@@ -15,8 +15,8 @@ use objc2::Message;
 use objc2::rc::Retained;
 use objc2_app_kit::{
     NSApplication, NSButton, NSCellImagePosition, NSColor, NSFont, NSFontAttributeName,
-    NSForegroundColorAttributeName, NSMutableParagraphStyle, NSParagraphStyleAttributeName,
-    NSTextAlignment, NSView,
+    NSFontWeightRegular, NSForegroundColorAttributeName, NSMutableParagraphStyle,
+    NSParagraphStyleAttributeName, NSTextAlignment, NSView,
 };
 use objc2_foundation::{NSMutableAttributedString, NSRange, NSString};
 
@@ -63,13 +63,13 @@ fn style(button: &NSButton, title: &str) {
     let text = NSMutableAttributedString::from_nsstring(&NSString::from_str(title));
     let length = title.encode_utf16().count();
     let paragraph = NSMutableParagraphStyle::new();
-    paragraph.setAlignment(NSTextAlignment::Left);
+    paragraph.setAlignment(NSTextAlignment::Right);
     // SAFETY: the attribute names are AppKit's, their values are the matching
     // objects, and the range is within the string.
     unsafe {
         text.addAttribute_value_range(
             NSFontAttributeName,
-            &NSFont::menuBarFontOfSize(10.0),
+            &NSFont::monospacedSystemFontOfSize_weight(9.5, NSFontWeightRegular),
             NSRange::new(0, length),
         );
         text.addAttribute_value_range(

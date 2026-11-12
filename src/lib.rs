@@ -60,6 +60,7 @@ struct Store {
     config: Signal<config::Config>,
     /// Linux tray hosts can miss a label set before they start; the label is
     /// sent once more after startup.
+    #[cfg(target_os = "linux")]
     tray_ready: Signal<bool>,
 }
 
@@ -79,7 +80,8 @@ pub fn App() -> impl IntoElement {
             eprintln!("[quota-bar] config: {error}; showing every provider");
             config::Config::default()
         })),
-        tray_ready: signal(cfg!(not(target_os = "linux"))),
+        #[cfg(target_os = "linux")]
+        tray_ready: signal(false),
     };
 
     // One fetch at launch, then only on demand.
@@ -310,6 +312,7 @@ fn window_remaining(source: &Source, five_hour: bool) -> Option<f64> {
         .reduce(f64::min)
 }
 
+#[cfg(target_os = "linux")]
 fn tray_runs(store: Store) -> Vec<TrayTitleRun> {
     if !store.tray_ready.get() {
         return Vec::new();
@@ -391,10 +394,17 @@ fn set_tray_menu(store: Store) {
     let config = store.config.get();
     #[cfg(target_os = "macos")]
     let macos_title = macos_tray_title(store);
+    // NSH sizes the status item to its title; give macOS the two-line title
+    // from the start so a long single-line one never widens it past the menu
+    // bar. The AppKit pass below then sets the compact monospaced font.
+    #[cfg(target_os = "macos")]
+    let title = vec![TrayTitleRun::new(macos_title.clone())];
+    #[cfg(not(target_os = "macos"))]
+    let title = tray_runs(store);
     set_tray(
         tray()
             .icon(TRAY_ICON)
-            .title(tray_runs(store))
+            .title(title)
             .tooltip(format!("AI 额度：{}", enabled_shorts(&config)))
             .on_click(move |event| toggle_panel(store, event.bounds, false))
             .menu([
@@ -405,8 +415,8 @@ fn set_tray_menu(store: Store) {
                 MenuItem::new("退出").on_select(quit),
             ]),
     );
-    // NSH sets its one-line title and transparent icon first; AppKit gets
-    // the compact two-line, icon-less item right after.
+    // NSH sets the two-line title and transparent icon first; AppKit gets
+    // the compact monospaced, right-aligned, icon-less item right after.
     #[cfg(target_os = "macos")]
     set_timeout(Duration::from_millis(80), move || {
         // The task is queued; dropping the future only drops its result.
