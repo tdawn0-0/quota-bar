@@ -128,11 +128,12 @@ overrides it.
 ## Look
 
 The panel is a rounded, translucent sheet with layered cards and a hairline top
-edge. NSH 0.5's macOS backend paints an opaque window background, so the
-translucency is drawn in-app rather than as an `NSVisualEffectView` blur; a real
-vibrancy material would need the platform layer. The Linux GTK backend draws the
-same sheet; its own translucent fill carries the look where GTK has no popover
-material.
+edge. The window itself stays transparent and the sheet's own fill draws the
+material, with its content clipped to the rounded shape. NSH 0.5 puts macOS's
+popover material behind the whole rectangular window, which would show as a
+square layer outside the corners, so it is not used. The Linux GTK backend draws
+the same sheet; its own translucent fill carries the look where GTK has no
+popover material.
 
 ## Layout
 

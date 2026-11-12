@@ -346,7 +346,9 @@ fn set_tray_menu(store: Store) {
 fn glass_attributes() -> WindowAttributes {
     let mut attributes = WindowAttributes::default();
     attributes.transparent = Some(true);
-    attributes.backdrop = Some(nsh_core::desktop::Backdrop::Popover);
+    // No popover material: NSH 0.5 puts macOS's NSVisualEffectView behind
+    // the whole rectangular window, so it shows as a square layer outside
+    // the sheet's rounded corners. The sheet's own fill is the material.
     attributes.close_on_blur = Some(true);
     attributes.activate = Some(true);
     attributes
@@ -462,11 +464,15 @@ fn value_color(remaining: Option<f64>) -> AdaptiveColor {
 }
 
 fn panel(store: Store) -> impl IntoElement {
+    // Read the list here, not only in the rows: an open panel must rebuild
+    // when a fetch lands, and the row signals alone did not repaint it.
+    let sources = store.sources.get();
     view()
         .flex_1()
         .flex_col()
         .w_full()
         .rounded(px(14.0))
+        .overflow_hidden()
         .bg(sheet_fill())
         .border(px(1.0))
         .border_color(glass_border())
@@ -481,11 +487,7 @@ fn panel(store: Store) -> impl IntoElement {
                     .gap(px(8.0))
                     .px(px(12.0))
                     .pb(px(12.0))
-                    .child(each(
-                        store.sources,
-                        |source| source.short,
-                        |source, _| card(source.get()),
-                    )),
+                    .children(sources.into_iter().map(card)),
             ),
         )
         .child(footer(store))
