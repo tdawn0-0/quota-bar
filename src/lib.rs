@@ -1,9 +1,10 @@
 //! Quota Bar: a menu bar app showing the remaining quota of the local AI CLIs.
 //!
-//! Resource budget: nothing polls in the background. Data is fetched once at
-//! launch, again when the panel is opened after two minutes, and whenever the
-//! refresh control or menu item asks. The panel is a popup window that closes
-//! on blur, so an idle app is one tray item and a few kilobytes of state.
+//! Resource budget: no busy loop. Data is fetched at launch, every five
+//! minutes, whenever the refresh control or menu item asks, and when a
+//! provider is turned back on; opening the panel only reads what is already in
+//! memory. The panel is a popup window that closes on blur, so an idle app is
+//! one tray item and a few kilobytes of state.
 
 mod config;
 mod quota;
@@ -42,6 +43,8 @@ thread_local! {
     static PANEL: RefCell<Option<WindowRef>> = const { RefCell::new(None) };
     /// When it opened, so activation that arrives late does not close it.
     static OPENED_AT: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+    /// A pinned panel (screenshots) stays open when another app comes forward.
+    static PINNED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// The signals the app shares between its tray handler and its panel.
@@ -90,7 +93,7 @@ pub fn App() -> impl IntoElement {
     // Switching to another app closes the panel. The delay lets the
     // activation that follows a tray click land first.
     effect(move || {
-        if lifecycle() == Lifecycle::Active {
+        if lifecycle() == Lifecycle::Active || PINNED.with(|pinned| pinned.get()) {
             return;
         }
         set_timeout(Duration::from_millis(400), move || {
@@ -109,10 +112,15 @@ pub fn App() -> impl IntoElement {
         .unwrap_or(300);
     set_interval(Duration::from_secs(interval), move || refresh(store));
 
-    // `QUOTA_BAR_OPEN_PANEL=1` opens the panel at launch, for screenshots.
+    // `QUOTA_BAR_OPEN_PANEL=1` opens the panel at launch, for screenshots;
+    // `QUOTA_BAR_OPEN_DELAY_MS` waits for the first fetch before opening it.
     if std::env::var_os("QUOTA_BAR_OPEN_PANEL").is_some() {
         let pinned = std::env::var_os("QUOTA_BAR_PIN_PANEL").is_some();
-        set_timeout(Duration::from_millis(700), move || {
+        let delay = std::env::var("QUOTA_BAR_OPEN_DELAY_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(700);
+        set_timeout(Duration::from_millis(delay), move || {
             toggle_panel(store, None, pinned)
         });
     }
@@ -343,13 +351,13 @@ fn set_tray_menu(store: Store) {
     );
 }
 
-fn glass_attributes() -> WindowAttributes {
+fn glass_attributes(pinned: bool) -> WindowAttributes {
     let mut attributes = WindowAttributes::default();
     attributes.transparent = Some(true);
     // No popover material: NSH 0.5 puts macOS's NSVisualEffectView behind
     // the whole rectangular window, so it shows as a square layer outside
     // the sheet's rounded corners. The sheet's own fill is the material.
-    attributes.close_on_blur = Some(true);
+    attributes.close_on_blur = Some(!pinned);
     attributes.activate = Some(true);
     attributes
 }
@@ -360,6 +368,7 @@ fn toggle_panel(store: Store, bounds: Option<Bounds<Points>>, pinned: bool) {
         if panel.state().map(|state| state.visible).unwrap_or(false) {
             panel.close();
             PANEL.with(|slot| *slot.borrow_mut() = None);
+            PINNED.with(|slot| slot.set(false));
             return;
         }
     }
@@ -370,6 +379,7 @@ fn close_panel() {
     if let Some(panel) = PANEL.with(|slot| slot.borrow().clone()) {
         panel.close();
         PANEL.with(|slot| *slot.borrow_mut() = None);
+        PINNED.with(|slot| slot.set(false));
     }
 }
 
@@ -383,7 +393,8 @@ fn panel_height(store: Store) -> f32 {
     (104.0 + count as f32 * 184.0).clamp(220.0, PANEL_MAX_HEIGHT)
 }
 
-fn open_panel(store: Store, bounds: Option<Bounds<Points>>, _pinned: bool) {
+fn open_panel(store: Store, bounds: Option<Bounds<Points>>, pinned: bool) {
+    PINNED.with(|slot| slot.set(pinned));
     let position = bounds.map(|icon| {
         let x = icon.origin.x.0 + icon.size.width.0 / 2.0 - PANEL_WIDTH / 2.0;
         let y = icon.origin.y.0 + icon.size.height.0 + 6.0;
@@ -401,7 +412,7 @@ fn open_panel(store: Store, bounds: Option<Bounds<Points>>, _pinned: bool) {
     let mut builder = window()
         .id("panel")
         .kind(WindowKind::Popup)
-        .attributes(glass_attributes())
+        .attributes(glass_attributes(pinned))
         .default_size(size(px(PANEL_WIDTH), px(panel_height(store))))
         .content(move || panel(store));
     if let Some(position) = debug_at.or(position) {
