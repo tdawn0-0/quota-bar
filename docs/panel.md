@@ -68,6 +68,7 @@ laptop screen.
   a menu and its **面板** item opens the panel.
 - Data refreshes at launch, every five minutes, with the **刷新** button, or
   from the tray's **刷新** item. A provider turned back on refreshes right away.
-- **置顶** pins the panel: it stays above other windows and stays open when
-  another app comes forward. Press **已置顶** to release it.
+- **置顶** pins the panel: it stays above other windows and outside clicks
+  no longer dismiss it; clicking the tray icon brings it forward instead.
+  Escape still closes it, and pressing **已置顶** releases the pin.
 - `QUOTA_BAR_PIN_PANEL=1` opens the panel pinned for screenshots.

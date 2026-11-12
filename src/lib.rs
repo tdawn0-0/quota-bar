@@ -20,6 +20,7 @@ use nsh_core::color::{rgb, rgba};
 use nsh_core::desktop::{TrayTitleRun, WindowAttributes, WindowKind, WindowLevel, WindowPosition};
 use nsh_core::element::desktop::{MenuItem, WindowRef, open_window, quit, set_tray, tray, window};
 use nsh_core::geometry::{Bounds, Points, point, px, size};
+#[cfg(target_os = "macos")]
 use nsh_core::platform::Lifecycle;
 use nsh_core::prelude::*;
 use nsh_core::time::unix_ms;
@@ -97,7 +98,10 @@ pub fn App() -> impl IntoElement {
     set_timeout(Duration::from_secs(2), move || store.tray_ready.set(true));
 
     // Switching to another app closes the panel. The delay lets the
-    // activation that follows a tray click land first.
+    // activation that follows a tray click land first. On Linux the app
+    // reports Background while its hidden main window is unmapped, so there
+    // the platform's `closeOnBlur` does this instead.
+    #[cfg(target_os = "macos")]
     effect(move || {
         if lifecycle() == Lifecycle::Active || store.pinned.get() {
             return;
@@ -478,10 +482,15 @@ fn glass_attributes(pinned: bool) -> WindowAttributes {
     attributes
 }
 
-/// A tray click closes an open panel and opens a closed one.
+/// A tray click closes an open panel and opens a closed one; a pinned panel
+/// stays and comes forward instead.
 fn toggle_panel(store: Store, bounds: Option<Bounds<Points>>, pinned: bool) {
     if let Some(panel) = PANEL.with(|slot| slot.borrow().clone()) {
         if panel.state().map(|state| state.visible).unwrap_or(false) {
+            if store.pinned.get() {
+                panel.focus();
+                return;
+            }
             panel.close();
             PANEL.with(|slot| *slot.borrow_mut() = None);
             store.pinned.set(false);
@@ -546,6 +555,12 @@ fn open_panel(store: Store, bounds: Option<Bounds<Points>>, pinned: bool) {
         .kind(WindowKind::Popup)
         .attributes(glass_attributes(pinned))
         .default_size(size(px(PANEL_WIDTH), px(panel_height(store))))
+        .on_open_change(move |change| {
+            if !change.open {
+                PANEL.with(|slot| *slot.borrow_mut() = None);
+                store.pinned.set(false);
+            }
+        })
         .content(move || panel(store));
     if let Some(position) = debug_at.or(position) {
         builder = builder.default_position(position);
