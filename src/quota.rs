@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use nsh_core::prelude::{HttpRequest, blocking, fetch};
+use nsh_core::time::unix_ms;
 use serde_json::{Value, json};
 
 /// One quota window (session, week, month) of a source.
@@ -90,6 +91,12 @@ pub const PROVIDERS: &[Provider] = &[
         short: "cx",
         title: "Codex",
         kind: Kind::Async(|| Box::pin(codex())),
+    },
+    Provider {
+        id: "grok",
+        short: "gk",
+        title: "Grok Build",
+        kind: Kind::Async(|| Box::pin(grok())),
     },
     Provider {
         id: "opencode",
@@ -776,6 +783,296 @@ fn codex_program() -> String {
     program("codex")
 }
 
+// --------------------------------------------------------------------- grok
+
+/// Grok Build's quota, read from the same billing endpoint its CLI uses.
+/// `grok usage --json` currently refuses outside the TUI, but the OIDC login
+/// in `~/.grok/auth.json` calls the endpoint directly; an expired access
+/// token is refreshed with the stored refresh token and written back.
+pub async fn grok() -> Source {
+    let mut source = Source::empty("gk", "Grok Build");
+    match fetch_grok().await {
+        Ok((metrics, note)) => {
+            source.metrics = metrics;
+            source.note = note;
+        }
+        Err(error) => source.error = error,
+    }
+    source
+}
+
+const GROK_BILLING_URL: &str = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
+const GROK_TOKEN_URL: &str = "https://auth.x.ai/oauth2/token";
+
+struct GrokAuth {
+    path: std::path::PathBuf,
+    entry: String,
+    issuer: String,
+    client_id: String,
+    key: String,
+    refresh_token: Option<String>,
+}
+
+async fn fetch_grok() -> Result<(Vec<Metric>, String), String> {
+    let mut auth = read_grok_auth()?;
+    let (mut status, mut body) = grok_billing(&auth.key).await?;
+    if status == 401 || status == 403 {
+        refresh_grok(&mut auth).await?;
+        (status, body) = grok_billing(&auth.key).await?;
+    }
+    if status == 401 || status == 403 {
+        return Err("grok: 登录已过期（grok login）".to_owned());
+    }
+    if !(200..300).contains(&status) {
+        return Err(format!("grok: HTTP {status}"));
+    }
+    let value: Value = serde_json::from_str(&body).map_err(|e| format!("grok: {e}"))?;
+    grok_from_billing(&value, unix_ms() as u64)
+}
+
+fn grok_home() -> std::path::PathBuf {
+    std::env::var_os("GROK_HOME")
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(home(".grok")))
+}
+
+fn read_grok_auth() -> Result<GrokAuth, String> {
+    let path = grok_home().join("auth.json");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("grok: {}: {e}（grok login）", path.display()))?;
+    let value: Value =
+        serde_json::from_str(&text).map_err(|e| format!("grok: {}: {e}", path.display()))?;
+    let entries = value
+        .as_object()
+        .ok_or_else(|| format!("grok: {} 格式不对", path.display()))?;
+
+    let mut chosen: Option<(&String, &Value)> = None;
+    for (route, entry) in entries {
+        let has_key = entry
+            .get("key")
+            .and_then(Value::as_str)
+            .is_some_and(|key| !key.trim().is_empty());
+        if !has_key {
+            continue;
+        }
+        let issuer = entry
+            .get("oidc_issuer")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let created = entry
+            .get("create_time")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let better = chosen.is_none_or(|(_, old)| {
+            let old_issuer = old.get("oidc_issuer").and_then(Value::as_str).unwrap_or("");
+            let old_created = old.get("create_time").and_then(Value::as_str).unwrap_or("");
+            (issuer == "https://auth.x.ai", created)
+                > (old_issuer == "https://auth.x.ai", old_created)
+        });
+        if better {
+            chosen = Some((route, entry));
+        }
+    }
+
+    let Some((entry, value)) = chosen else {
+        return Err("grok: 未登录（grok login）".to_owned());
+    };
+    let key = value
+        .get("key")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "grok: 未登录（grok login）".to_owned())?
+        .to_owned();
+    Ok(GrokAuth {
+        path,
+        entry: entry.clone(),
+        issuer: value
+            .get("oidc_issuer")
+            .and_then(Value::as_str)
+            .unwrap_or("https://auth.x.ai")
+            .to_owned(),
+        client_id: value
+            .get("oidc_client_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned(),
+        refresh_token: value
+            .get("refresh_token")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        key,
+    })
+}
+
+async fn grok_billing(token: &str) -> Result<(u16, String), String> {
+    let request = HttpRequest::get(GROK_BILLING_URL)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "application/json");
+    let response = fetch(request).await.map_err(|e| format!("grok: {e}"))?;
+    Ok((response.status(), response.text()))
+}
+
+async fn refresh_grok(auth: &mut GrokAuth) -> Result<(), String> {
+    let Some(refresh) = auth.refresh_token.clone() else {
+        return Err("grok: 登录已过期（grok login）".to_owned());
+    };
+    if auth.issuer != "https://auth.x.ai" || auth.client_id.is_empty() {
+        return Err("grok: 登录已过期（grok login）".to_owned());
+    }
+    let body = format!(
+        "grant_type=refresh_token&refresh_token={}&client_id={}",
+        url_encode(&refresh),
+        url_encode(&auth.client_id)
+    );
+    let request = HttpRequest::post(GROK_TOKEN_URL, body)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("Accept", "application/json");
+    let response = fetch(request)
+        .await
+        .map_err(|e| format!("grok: 刷新登录: {e}"))?;
+    let status = response.status();
+    let text = response.text();
+    if !(200..300).contains(&status) {
+        return Err(format!("grok: 刷新登录失败（HTTP {status}）"));
+    }
+    let value: Value = serde_json::from_str(&text).map_err(|e| format!("grok: 刷新登录: {e}"))?;
+    let access = value
+        .get("access_token")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "grok: 刷新登录没有返回 token".to_owned())?;
+    let refresh = value.get("refresh_token").and_then(Value::as_str);
+    let expires_in = value.get("expires_in").and_then(Value::as_i64);
+    save_grok_auth(&auth.path, &auth.entry, access, refresh, expires_in)?;
+    auth.key = access.to_owned();
+    if let Some(refresh) = refresh {
+        auth.refresh_token = Some(refresh.to_owned());
+    }
+    Ok(())
+}
+
+/// Writes the refreshed login back to the CLI's `auth.json`, so the CLI stays
+/// signed in too (a refresh can rotate the refresh token).
+fn save_grok_auth(
+    path: &std::path::Path,
+    entry: &str,
+    access: &str,
+    refresh: Option<&str>,
+    expires_in: Option<i64>,
+) -> Result<(), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut value: Value =
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let entry = value
+        .get_mut(entry)
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "auth.json 里找不到登录条目".to_owned())?;
+    entry.insert("key".to_owned(), json!(access));
+    if let Some(refresh) = refresh {
+        entry.insert("refresh_token".to_owned(), json!(refresh));
+    }
+    if let Some(seconds) = expires_in {
+        let at = unix_ms() as i64 + seconds.saturating_mul(1000);
+        entry.insert("expires_at".to_owned(), json!(rfc3339_ms(at.max(0) as u64)));
+    }
+    let text = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())? + "\n";
+    let temp = path.with_file_name(format!(".auth.json.quota-bar.{}", std::process::id()));
+    std::fs::write(&temp, text).map_err(|e| format!("{}: {e}", temp.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("{}: {e}", temp.display()))?;
+    }
+    std::fs::rename(&temp, path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn rfc3339_ms(ms: u64) -> String {
+    let seconds = (ms / 1000) as i64;
+    let days = seconds.div_euclid(86_400);
+    let rem = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}000Z",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60,
+        ms % 1000
+    )
+}
+
+fn url_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+fn grok_from_billing(data: &Value, now_ms: u64) -> Result<(Vec<Metric>, String), String> {
+    let config = data
+        .get("config")
+        .filter(|value| value.is_object())
+        .ok_or_else(|| "grok: 响应里没有额度".to_owned())?;
+    let period = config
+        .get("currentPeriod")
+        .filter(|value| value.is_object());
+    let label = match period
+        .and_then(|period| period.get("type"))
+        .and_then(Value::as_str)
+    {
+        Some("USAGE_PERIOD_TYPE_WEEKLY") => "本周额度",
+        Some("USAGE_PERIOD_TYPE_MONTHLY") => "本月额度",
+        Some("USAGE_PERIOD_TYPE_DAILY") => "今日额度",
+        _ => "额度",
+    };
+    let mut metrics = Vec::new();
+    if let Some(used) = config.get("creditUsagePercent").and_then(Value::as_f64) {
+        let detail = period
+            .and_then(|period| period.get("end"))
+            .and_then(Value::as_str)
+            .map(|end| reset_in(end, now_ms))
+            .unwrap_or_default();
+        metrics.push(Metric {
+            label: label.to_owned(),
+            remaining: Some((100.0 - used).max(0.0)),
+            detail,
+        });
+    }
+    if let Some(products) = config.get("productUsage").and_then(Value::as_array) {
+        for product in products {
+            let Some(used) = product.get("usagePercent").and_then(Value::as_f64) else {
+                continue;
+            };
+            let name = product
+                .get("product")
+                .and_then(Value::as_str)
+                .unwrap_or("Grok");
+            metrics.push(Metric {
+                label: grok_product(name),
+                remaining: Some((100.0 - used).max(0.0)),
+                detail: String::new(),
+            });
+        }
+    }
+    if metrics.is_empty() {
+        return Err("grok: 响应里没有额度窗口".to_owned());
+    }
+    Ok((metrics, String::new()))
+}
+
+fn grok_product(name: &str) -> String {
+    match name.to_ascii_lowercase().as_str() {
+        "grokbuild" => "Grok Build".to_owned(),
+        "grokchat" => "Grok Chat".to_owned(),
+        _ => name.to_owned(),
+    }
+}
+
 // ---------------------------------------------------------------- opencode
 
 pub async fn opencode() -> Source {
@@ -1028,5 +1325,44 @@ mod tests {
             codex_credits(Some(&json!({"unlimited": false, "balance": "12"}))).as_deref(),
             Some("credits 12")
         );
+    }
+
+    #[test]
+    fn grok_billing_maps_the_weekly_credit_and_products() {
+        let value = json!({
+            "config": {
+                "currentPeriod": {
+                    "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                    "start": "2026-11-06T03:41:51.334138+00:00",
+                    "end": "2026-11-13T03:41:51.334138+00:00"
+                },
+                "creditUsagePercent": 17.0,
+                "productUsage": [
+                    {"product": "GrokBuild", "usagePercent": 10.0},
+                    {"product": "GrokChat", "usagePercent": 7.0}
+                ]
+            }
+        });
+        let (metrics, note) = grok_from_billing(&value, 1_760_000_000_000).unwrap();
+        assert_eq!(metrics.len(), 3);
+        assert_eq!(metrics[0].label, "本周额度");
+        assert_eq!(metrics[0].remaining, Some(83.0));
+        assert_eq!(metrics[1].label, "Grok Build");
+        assert_eq!(metrics[1].remaining, Some(90.0));
+        assert_eq!(metrics[2].label, "Grok Chat");
+        assert_eq!(metrics[2].remaining, Some(93.0));
+        assert!(note.is_empty());
+    }
+
+    #[test]
+    fn grok_billing_without_usage_is_an_error() {
+        assert!(grok_from_billing(&json!({"config": {}}), 0).is_err());
+        assert!(grok_from_billing(&json!({}), 0).is_err());
+    }
+
+    #[test]
+    fn grok_form_values_are_percent_encoded() {
+        assert_eq!(url_encode("a-b_c.d~e"), "a-b_c.d~e");
+        assert_eq!(url_encode("a b+c/d"), "a%20b%2Bc%2Fd");
     }
 }
