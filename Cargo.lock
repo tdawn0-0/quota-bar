@@ -2694,6 +2694,7 @@ name = "quota-bar"
 version = "0.1.0"
 dependencies = [
  "env_logger",
+ "gtk4",
  "log",
  "nsh-base",
  "nsh-core",

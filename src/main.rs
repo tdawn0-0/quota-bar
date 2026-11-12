@@ -2,6 +2,8 @@
 
 #[cfg(target_os = "linux")]
 use nsh_platform_linux as platform;
+#[cfg(target_os = "linux")]
+mod linux_display;
 #[cfg(target_os = "macos")]
 use nsh_platform_macos as platform;
 
@@ -9,6 +11,8 @@ use nsh_platform_macos as platform;
 fn main() -> impl std::process::Termination {
     env_logger::init();
     quota_bar::ensure_single_instance();
+    #[cfg(target_os = "linux")]
+    gtk4::glib::idle_add_local_once(linux_display::install);
     platform::run_app(platform::AppSource::Rust(app_root()), app_options())
 }
 

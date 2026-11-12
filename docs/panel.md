@@ -88,6 +88,8 @@ the fallback until you have resized it once.
   including on another monitor. This also applies after unpinning. Escape or
   a second tray click still closes an unpinned panel; reopening lets the window
   manager place a new window, since the GTK backend cannot restore coordinates.
+- Moving the Linux panel between display scales reapplies pixel alignment to
+  its content, including fractional scales, without resizing or reopening it.
 - Data refreshes at launch, every five minutes, with the **刷新** button, or
   from the tray's **刷新** item. A provider turned back on refreshes right away.
 - **置顶** pins the panel: it stays above other windows and outside clicks
