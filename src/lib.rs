@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use nsh_base::theme;
 use nsh_core::color::{rgb, rgba};
-use nsh_core::desktop::{TrayTitleRun, WindowAttributes, WindowKind, WindowPosition};
+use nsh_core::desktop::{TrayTitleRun, WindowAttributes, WindowKind, WindowLevel, WindowPosition};
 use nsh_core::element::desktop::{MenuItem, WindowRef, open_window, quit, set_tray, tray, window};
 use nsh_core::geometry::{Bounds, Points, point, px, size};
 use nsh_core::platform::Lifecycle;
@@ -45,8 +45,6 @@ thread_local! {
     static PANEL: RefCell<Option<WindowRef>> = const { RefCell::new(None) };
     /// When it opened, so activation that arrives late does not close it.
     static OPENED_AT: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
-    /// A pinned panel (screenshots) stays open when another app comes forward.
-    static PINNED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// The signals the app shares between its tray handler and its panel.
@@ -58,6 +56,8 @@ struct Store {
     /// Set when a refresh was asked for while one was running.
     pending: Signal<bool>,
     config: Signal<config::Config>,
+    /// A pinned panel stays open when another app comes forward.
+    pinned: Signal<bool>,
     /// Linux tray hosts can miss a label set before they start; the label is
     /// sent once more after startup.
     #[cfg(target_os = "linux")]
@@ -76,10 +76,8 @@ pub fn App() -> impl IntoElement {
         updated: signal(0.0_f64),
         busy: signal(false),
         pending: signal(false),
-        config: signal(config::Config::load().unwrap_or_else(|error| {
-            eprintln!("[quota-bar] config: {error}; showing every provider");
-            config::Config::default()
-        })),
+        config: signal(load_config()),
+        pinned: signal(false),
         #[cfg(target_os = "linux")]
         tray_ready: signal(false),
     };
@@ -97,13 +95,13 @@ pub fn App() -> impl IntoElement {
     // Switching to another app closes the panel. The delay lets the
     // activation that follows a tray click land first.
     effect(move || {
-        if lifecycle() == Lifecycle::Active || PINNED.with(|pinned| pinned.get()) {
+        if lifecycle() == Lifecycle::Active || store.pinned.get() {
             return;
         }
         set_timeout(Duration::from_millis(400), move || {
             let age = unix_ms() - OPENED_AT.with(|at| at.get());
-            if lifecycle() != Lifecycle::Active && age > 900.0 {
-                close_panel();
+            if lifecycle() != Lifecycle::Active && age > 900.0 && !store.pinned.get() {
+                close_panel(store);
             }
         });
     });
@@ -134,6 +132,33 @@ pub fn App() -> impl IntoElement {
     view().w_full().h_full()
 }
 
+/// Reads the config, then hides providers this machine does not have unless
+/// the file names them explicitly.
+fn load_config() -> config::Config {
+    let mut config = config::Config::load().unwrap_or_else(|error| {
+        eprintln!("[quota-bar] config: {error}; using defaults");
+        config::Config::default()
+    });
+    detect_providers(&mut config);
+    if std::env::var_os("QUOTA_BAR_DEBUG").is_some() {
+        let on: Vec<&str> = quota::PROVIDERS
+            .iter()
+            .filter(|provider| config.enabled(provider.id))
+            .map(|provider| provider.short)
+            .collect();
+        eprintln!("[quota-bar] providers on: {}", on.join(" "));
+    }
+    config
+}
+
+fn detect_providers(config: &mut config::Config) {
+    for provider in quota::PROVIDERS {
+        if !config.declared(provider.id) && !provider.detected() {
+            config.set_enabled(provider.id, false);
+        }
+    }
+}
+
 /// Collects every enabled source and updates the signals. Runs at most once
 /// at a time; a request that arrives meanwhile runs once this one is done.
 fn refresh(store: Store) {
@@ -144,8 +169,9 @@ fn refresh(store: Store) {
     store.pending.set(false);
 
     // Pick up a config file edited outside the app.
-    let config = config::Config::reload(&store.config.get());
+    let mut config = config::Config::reload(&store.config.get());
     if config != store.config.get() {
+        detect_providers(&mut config);
         store.config.set(config);
         prune(store);
     }
@@ -431,6 +457,11 @@ fn glass_attributes(pinned: bool) -> WindowAttributes {
     // the whole rectangular window, so it shows as a square layer outside
     // the sheet's rounded corners. The sheet's own fill is the material.
     attributes.close_on_blur = Some(!pinned);
+    attributes.level = Some(if pinned {
+        WindowLevel::Floating
+    } else {
+        WindowLevel::Normal
+    });
     attributes.activate = Some(true);
     attributes
 }
@@ -441,18 +472,34 @@ fn toggle_panel(store: Store, bounds: Option<Bounds<Points>>, pinned: bool) {
         if panel.state().map(|state| state.visible).unwrap_or(false) {
             panel.close();
             PANEL.with(|slot| *slot.borrow_mut() = None);
-            PINNED.with(|slot| slot.set(false));
+            store.pinned.set(false);
             return;
         }
     }
     open_panel(store, bounds, pinned);
 }
 
-fn close_panel() {
+fn close_panel(store: Store) {
     if let Some(panel) = PANEL.with(|slot| slot.borrow().clone()) {
         panel.close();
         PANEL.with(|slot| *slot.borrow_mut() = None);
-        PINNED.with(|slot| slot.set(false));
+        store.pinned.set(false);
+    }
+}
+
+/// Keeps the panel open (and above other windows) until it is unpinned.
+fn toggle_pin(store: Store) {
+    let pinned = !store.pinned.get();
+    store.pinned.set(pinned);
+    if let Some(panel) = PANEL.with(|slot| slot.borrow().clone()) {
+        let mut attributes = WindowAttributes::default();
+        attributes.close_on_blur = Some(!pinned);
+        attributes.level = Some(if pinned {
+            WindowLevel::Floating
+        } else {
+            WindowLevel::Normal
+        });
+        panel.set(attributes);
     }
 }
 
@@ -467,7 +514,7 @@ fn panel_height(store: Store) -> f32 {
 }
 
 fn open_panel(store: Store, bounds: Option<Bounds<Points>>, pinned: bool) {
-    PINNED.with(|slot| slot.set(pinned));
+    store.pinned.set(pinned);
     let position = bounds.map(|icon| {
         let x = icon.origin.x.0 + icon.size.width.0 / 2.0 - PANEL_WIDTH / 2.0;
         let y = icon.origin.y.0 + icon.size.height.0 + 6.0;
@@ -587,6 +634,7 @@ fn header(store: Store) -> impl IntoElement {
         .pt(px(12.0))
         .pb(px(10.0))
         .gap(px(8.0))
+        .window_drag(true)
         .child(
             text("AI 额度")
                 .text_size(px(13.0))
@@ -628,6 +676,32 @@ fn header(store: Store) -> impl IntoElement {
                                     "刷新中"
                                 } else {
                                     "刷新"
+                                }
+                            })
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(move || theme().secondary_foreground),
+                        ),
+                )
+                .child(
+                    view()
+                        .px(px(9.0))
+                        .py(px(4.0))
+                        .rounded(px(6.0))
+                        .bg(move || {
+                            if store.pinned.get() {
+                                theme().secondary
+                            } else {
+                                theme().muted
+                            }
+                        })
+                        .on_press(move || toggle_pin(store))
+                        .child(
+                            text(move || {
+                                if store.pinned.get() {
+                                    "已置顶"
+                                } else {
+                                    "置顶"
                                 }
                             })
                             .text_size(px(11.0))

@@ -98,9 +98,12 @@ choice is saved to `config.json` in the app's data directory:
 $XDG_DATA_HOME/bar.jyeu.quota/config.json                  # Linux
 ```
 
-`QUOTA_BAR_CONFIG` overrides the path. Every provider is on unless its entry
-says otherwise, so a missing file shows everything and a provider added later
-starts enabled:
+`QUOTA_BAR_CONFIG` overrides the path. A provider the file does not mention is
+shown only when it is detected on this machine: its CLI is on the usual paths
+(`~/.local/bin`, Homebrew, `/usr/local/bin`, `PATH`), or its login file exists
+(`~/.codex/auth.json`, `~/.grok/auth.json`, Cursor's `state.vscdb`). A missing
+tool therefore starts hidden instead of showing an error, while an entry in
+the file always wins:
 
 ```json
 {
@@ -151,6 +154,7 @@ Debug switches for development and screenshots:
 | `QUOTA_BAR_PANEL_AT=x,y` | Place the panel (macOS) |
 | `QUOTA_BAR_REFRESH_SECS=15` | Faster refresh while testing (minimum 5) |
 | `QUOTA_BAR_CONFIG=path` | Use another config file |
+| `QUOTA_BAR_DEBUG=1` | Print the providers detection left enabled at startup |
 
 More in [docs/development.md](docs/development.md).
 

@@ -13,8 +13,10 @@ list continues below the window and scrolls.
 ## Anatomy
 
 **Header.** The title, how long ago the data was refreshed (`22 秒前`, or
-`未刷新` before the first fetch), and the **刷新** button, which reads
-**刷新中** while a batch is running.
+`未刷新` before the first fetch), the **刷新** button, which reads
+**刷新中** while a batch is running, and the **置顶** button, which reads
+**已置顶** while the panel is pinned. Dragging any blank part of the header
+moves the window; the buttons still click.
 
 **Cards.** One card per enabled provider, in a fixed order:
 
@@ -66,5 +68,6 @@ laptop screen.
   a menu and its **面板** item opens the panel.
 - Data refreshes at launch, every five minutes, with the **刷新** button, or
   from the tray's **刷新** item. A provider turned back on refreshes right away.
-- `QUOTA_BAR_PIN_PANEL=1` keeps the panel open for screenshots; otherwise it
-  closes on blur.
+- **置顶** pins the panel: it stays above other windows and stays open when
+  another app comes forward. Press **已置顶** to release it.
+- `QUOTA_BAR_PIN_PANEL=1` opens the panel pinned for screenshots.

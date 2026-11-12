@@ -41,6 +41,12 @@ impl Config {
         self.enabled.get(id).copied().unwrap_or(true)
     }
 
+    /// Whether the file names this provider (rather than leaving it to the
+    /// default), so startup detection does not override a chosen value.
+    pub fn declared(&self, id: &str) -> bool {
+        self.enabled.contains_key(id)
+    }
+
     pub fn set_enabled(&mut self, id: &str, on: bool) {
         self.enabled.insert(id.to_owned(), on);
     }

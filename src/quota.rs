@@ -61,6 +61,9 @@ pub struct Provider {
     pub short: &'static str,
     pub title: &'static str,
     pub kind: Kind,
+    /// Whether the tool shows up on this machine, so a missing one starts
+    /// hidden instead of showing an error.
+    pub detect: fn() -> bool,
 }
 
 /// How a provider gets its numbers.
@@ -79,40 +82,50 @@ pub const PROVIDERS: &[Provider] = &[
         short: "ag",
         title: "Antigravity",
         kind: Kind::Blocking(antigravity),
+        detect: || program_exists("agy"),
     },
     Provider {
         id: "claude",
         short: "cc",
         title: "Claude Code",
         kind: Kind::Blocking(|_now| claude()),
+        detect: || program_exists("claude"),
     },
     Provider {
         id: "codex",
         short: "cx",
         title: "Codex",
         kind: Kind::Async(|| Box::pin(codex())),
+        detect: || codex_home().join("auth.json").is_file() || program_exists("codex"),
     },
     Provider {
         id: "grok",
         short: "gk",
         title: "Grok Build",
         kind: Kind::Async(|| Box::pin(grok())),
+        detect: || grok_home().join("auth.json").is_file(),
     },
     Provider {
         id: "grokbot",
         short: "gb",
         title: "Grok Bot",
         kind: Kind::Async(|| Box::pin(grok_bot())),
+        detect: || cursor_access_token().is_ok(),
     },
     Provider {
         id: "opencode",
         short: "oc",
         title: "OpenCode Go",
         kind: Kind::Async(|| Box::pin(opencode())),
+        detect: || program_exists("opencode"),
     },
 ];
 
 impl Provider {
+    pub fn detected(&self) -> bool {
+        (self.detect)()
+    }
+
     pub fn by_short(short: &str) -> Option<&'static Self> {
         PROVIDERS.iter().find(|provider| provider.short == short)
     }
@@ -161,7 +174,7 @@ fn home(relative: &str) -> String {
 
 /// Where a CLI usually lives, for a GUI app launched with a small `PATH`.
 /// The bare name lets `Command` fall back to `PATH`.
-fn program(name: &str) -> String {
+fn find_program(name: &str) -> Option<String> {
     let candidates = [
         home(&format!(".local/bin/{name}")),
         format!("/opt/homebrew/bin/{name}"),
@@ -174,10 +187,25 @@ fn program(name: &str) -> String {
     ];
     for candidate in candidates {
         if std::path::Path::new(&candidate).is_file() {
-            return candidate;
+            return Some(candidate);
         }
     }
-    name.to_owned()
+    let paths = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&paths) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+fn program(name: &str) -> String {
+    find_program(name).unwrap_or_else(|| name.to_owned())
+}
+
+fn program_exists(name: &str) -> bool {
+    find_program(name).is_some()
 }
 
 /// Seconds until `timestamp` (RFC 3339), said as `2 天 15 小时后重置`.
