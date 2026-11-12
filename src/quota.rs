@@ -99,6 +99,12 @@ pub const PROVIDERS: &[Provider] = &[
         kind: Kind::Async(|| Box::pin(grok())),
     },
     Provider {
+        id: "grokbot",
+        short: "gb",
+        title: "Grok Bot",
+        kind: Kind::Async(|| Box::pin(grok_bot())),
+    },
+    Provider {
         id: "opencode",
         short: "oc",
         title: "OpenCode Go",
@@ -1073,6 +1079,146 @@ fn grok_product(name: &str) -> String {
     }
 }
 
+// ----------------------------------------------------------------- grok bot
+
+/// Grok Bot is Cursor's product: its app signs in through Cursor, and
+/// Cursor's dashboard reports the weekly allowance. The token is the Cursor
+/// app's login, read from its local state database.
+pub async fn grok_bot() -> Source {
+    let mut source = Source::empty("gb", "Grok Bot");
+    match fetch_grok_bot().await {
+        Ok((metrics, note)) => {
+            source.metrics = metrics;
+            source.note = note;
+        }
+        Err(error) => source.error = error,
+    }
+    source
+}
+
+const GROK_BOT_USAGE_URL: &str =
+    "https://api2.cursor.sh/aiserver.v1.DashboardService/GetSandUsageStatus";
+
+async fn fetch_grok_bot() -> Result<(Vec<Metric>, String), String> {
+    let token = cursor_access_token()?;
+    let request = HttpRequest::post(GROK_BOT_USAGE_URL, "{}")
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .header("Connect-Protocol-Version", "1")
+        .header("x-cursor-client-type", "grok-bot")
+        .header("x-ghost-mode", "true");
+    let response = fetch(request).await.map_err(|e| format!("grok bot: {e}"))?;
+    let status = response.status();
+    let body = response.text();
+    if status == 401 || status == 403 {
+        return Err("grok bot: Cursor 登录已过期（打开 Cursor 登录）".to_owned());
+    }
+    if !(200..300).contains(&status) {
+        return Err(format!("grok bot: HTTP {status}"));
+    }
+    let value: Value = serde_json::from_str(&body).map_err(|e| format!("grok bot: {e}"))?;
+    grok_bot_from_usage(&value, unix_ms() as u64)
+}
+
+fn cursor_access_token() -> Result<String, String> {
+    let path = cursor_state_db();
+    if !path.is_file() {
+        return Err(format!(
+            "grok bot: {} 不存在（打开 Cursor 登录）",
+            path.display()
+        ));
+    }
+    let path = path.to_string_lossy();
+    let text = run(
+        &program("sqlite3"),
+        &[
+            "-readonly",
+            "-noheader",
+            path.as_ref(),
+            "select value from ItemTable where key='cursorAuth/accessToken';",
+        ],
+    )
+    .map_err(|e| format!("grok bot: 读取 Cursor 登录: {e}"))?;
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("grok bot: Cursor 未登录（打开 Cursor 登录）".to_owned());
+    }
+    let token =
+        serde_json::from_str::<String>(text).unwrap_or_else(|_| text.trim_matches('"').to_owned());
+    if token.trim().is_empty() {
+        return Err("grok bot: Cursor 未登录（打开 Cursor 登录）".to_owned());
+    }
+    Ok(token)
+}
+
+fn cursor_state_db() -> std::path::PathBuf {
+    if let Some(path) = std::env::var_os("CURSOR_STATE_VSCDB").filter(|path| !path.is_empty()) {
+        return std::path::PathBuf::from(path);
+    }
+    default_cursor_state_db()
+}
+
+#[cfg(target_os = "macos")]
+fn default_cursor_state_db() -> std::path::PathBuf {
+    std::path::PathBuf::from(home(
+        "Library/Application Support/Cursor/User/globalStorage/state.vscdb",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn default_cursor_state_db() -> std::path::PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(home(".config")));
+    base.join("Cursor/User/globalStorage/state.vscdb")
+}
+
+fn grok_bot_from_usage(data: &Value, now_ms: u64) -> Result<(Vec<Metric>, String), String> {
+    if data
+        .get("usesPooledEnterpriseAllowance")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        return Err("grok bot: 企业共享额度，没有个人周额度".to_owned());
+    }
+    if data.get("hasNonZeroIncludedLimit").and_then(Value::as_bool) == Some(false) {
+        return Err("grok bot: 当前套餐没有个人周额度".to_owned());
+    }
+    let used = data
+        .get("usagePercent")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| "grok bot: 响应没有 usagePercent".to_owned())?;
+    let reset = data
+        .get("nextResetTimestampUtc")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let available = data
+        .get("hasAvailableUsage")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let detail = if !available {
+        "已用完".to_owned()
+    } else if reset.is_empty() {
+        String::new()
+    } else {
+        reset_in(reset, now_ms)
+    };
+    let note = data
+        .get("grokPlanLabel")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    Ok((
+        vec![Metric {
+            label: "本周额度".to_owned(),
+            remaining: Some((100.0 - used).max(0.0)),
+            detail,
+        }],
+        note,
+    ))
+}
+
 // ---------------------------------------------------------------- opencode
 
 pub async fn opencode() -> Source {
@@ -1364,5 +1510,29 @@ mod tests {
     fn grok_form_values_are_percent_encoded() {
         assert_eq!(url_encode("a-b_c.d~e"), "a-b_c.d~e");
         assert_eq!(url_encode("a b+c/d"), "a%20b%2Bc%2Fd");
+    }
+
+    #[test]
+    fn grok_bot_usage_maps_the_weekly_percentage() {
+        let value = json!({
+            "usagePercent": 7.359366,
+            "nextResetTimestampUtc": "2026-11-16T15:47:13.515Z",
+            "grokPlanLabel": "SuperGrok",
+            "hasNonZeroIncludedLimit": true,
+            "hasAvailableUsage": true
+        });
+        let (metrics, note) = grok_bot_from_usage(&value, 1_760_000_000_000).unwrap();
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].label, "本周额度");
+        let remaining = metrics[0].remaining.unwrap();
+        assert!((remaining - 92.640634).abs() < 0.001);
+        assert_eq!(note, "SuperGrok");
+    }
+
+    #[test]
+    fn grok_bot_without_an_individual_allowance_is_an_error() {
+        assert!(grok_bot_from_usage(&json!({"hasNonZeroIncludedLimit": false}), 0).is_err());
+        assert!(grok_bot_from_usage(&json!({"usesPooledEnterpriseAllowance": true}), 0).is_err());
+        assert!(grok_bot_from_usage(&json!({}), 0).is_err());
     }
 }

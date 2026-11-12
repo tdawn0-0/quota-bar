@@ -5,7 +5,7 @@ A menu bar app for macOS and a tray app for Linux, written in Rust with
 tray item, one popup panel, no web view and no JavaScript runtime.
 
 ```
-ag 16%  cc 78%  cx 75%  gk 83%  oc 93%
+ag 16%  cc 78%  cx 75%  gk 83%  gb 93%  oc 93%
 ```
 
 | Source | How it reads the quota |
@@ -14,6 +14,7 @@ ag 16%  cc 78%  cx 75%  gk 83%  oc 93%
 | Claude Code (`cc`) | `claude -p "/usage" --output-format json`, parsed from the CLI's own summary; remaining = 100 − used |
 | Codex (`cx`) | `GET https://chatgpt.com/backend-api/wham/usage` with the ChatGPT login in `~/.codex/auth.json`; a stale login falls back to `codex app-server`, which refreshes it without a model turn |
 | Grok Build (`gk`) | `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` with the OIDC login in `~/.grok/auth.json`; an expired token is refreshed and written back |
+| Grok Bot (`gb`) | `POST https://api2.cursor.sh/aiserver.v1.DashboardService/GetSandUsageStatus` with the Cursor login in its `state.vscdb`; Grok Bot signs in through Cursor |
 | OpenCode Go (`oc`) | `GET https://opencode.ai/zen/go/v1/usage` with the stored `oc_sk_…` key; `percent` is used, shown as remaining |
 
 ## Behaviour
@@ -46,6 +47,7 @@ file (or a provider added by a later version) starts enabled:
     "claude": true,
     "codex": true,
     "grok": true,
+    "grokbot": true,
     "opencode": false
   }
 }
@@ -70,6 +72,13 @@ instead"), so Grok Build reads the same billing endpoint its `/usage` view uses.
 It reuses the OIDC login in `~/.grok/auth.json` (or `$GROK_HOME/auth.json`),
 refreshes an expired access token with the stored refresh token, and writes the
 new one back so the CLI stays signed in. No model turn is made.
+
+Grok Bot is a Cursor product, so its weekly allowance comes from Cursor's
+dashboard, not the Grok billing endpoint. The app reads Cursor's `state.vscdb`
+(read-only, with `sqlite3`) for its login, then asks Cursor's
+`GetSandUsageStatus`. Cursor must be installed and signed in; the app never
+changes that database. These are the products' own internal endpoints, not
+public API, so they may change.
 
 To add a provider, add its collector in `src/quota.rs` and one entry to
 `PROVIDERS` there; the tray menu, config file and footer pick it up.
@@ -104,7 +113,7 @@ The Linux backend uses GTK 4, GStreamer and Pango. On Debian or Ubuntu:
 sudo apt install build-essential pkg-config libgtk-4-dev \
   libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
   libpango1.0-dev libcairo2-dev libgdk-pixbuf-2.0-dev libglib2.0-dev \
-  libxkbcommon-dev libwayland-dev libx11-dev libxi-dev libxcursor-dev
+  libxkbcommon-dev libwayland-dev libx11-dev libxi-dev libxcursor-dev sqlite3
 cargo run
 ```
 
