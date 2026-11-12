@@ -26,13 +26,13 @@ use std::cell::RefCell;
 thread_local! {
     /// The last title drawn: re-styling an unchanged item only makes the menu
     /// bar flicker.
-    static LAST: RefCell<Option<(String, bool)>> = const { RefCell::new(None) };
+    static LAST: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// Applies `title` (two lines, a `\n` between them) to the app's status item.
-/// `critical` adds a red dot when a provider is under 15%.
-pub fn apply(title: &str, critical: bool) {
-    if LAST.with(|last| last.borrow().as_ref() == Some(&(title.to_owned(), critical))) {
+/// A `●` in it marks a provider under 15% and is drawn red.
+pub fn apply(title: &str) {
+    if LAST.with(|last| last.borrow().as_deref() == Some(title)) {
         return;
     }
     let Some(mtm) = MainThreadMarker::new() else {
@@ -44,8 +44,8 @@ pub fn apply(title: &str, critical: bool) {
             continue;
         };
         if let Some(button) = find_button(&content) {
-            style(&button, title, critical);
-            LAST.with(|last| *last.borrow_mut() = Some((title.to_owned(), critical)));
+            style(&button, title);
+            LAST.with(|last| *last.borrow_mut() = Some(title.to_owned()));
             return;
         }
     }
@@ -71,7 +71,8 @@ fn find_button(view: &NSView) -> Option<Retained<NSButton>> {
 }
 
 #[allow(deprecated)]
-fn style(button: &NSButton, title: &str, critical: bool) {
+fn style(button: &NSButton, title: &str) {
+    let critical = title.contains('●');
     // No image at all: clearing it removes the icon-sized gap.
     button.setImage(None);
     button.setImagePosition(NSCellImagePosition::NoImage);
@@ -97,17 +98,19 @@ fn style(button: &NSButton, title: &str, critical: bool) {
         NSColor::labelColor()
     };
 
-    // The dot is drawn with the text: a template image would tint it away,
-    // so a critical item is a plain image whose text uses the menu bar's
-    // label color.
-    let title = if critical {
-        format!("{title} ●")
-    } else {
-        title.to_owned()
-    };
-    let text = NSMutableAttributedString::from_nsstring(&NSString::from_str(&title));
+    // The dots are drawn with the text: a template image would tint them
+    // away, so a critical item is a plain image whose text uses the menu
+    // bar's own label color.
+    let text = NSMutableAttributedString::from_nsstring(&NSString::from_str(title));
     let length = title.encode_utf16().count();
-    let dot = if critical { Some(length - 1) } else { None };
+    let mut dots = Vec::new();
+    let mut index = 0;
+    for ch in title.chars() {
+        if ch == '●' {
+            dots.push(index);
+        }
+        index += ch.len_utf16();
+    }
     let paragraph = NSMutableParagraphStyle::new();
     paragraph.setAlignment(NSTextAlignment::Right);
     paragraph.setMinimumLineHeight(9.0);
@@ -130,10 +133,10 @@ fn style(button: &NSButton, title: &str, critical: bool) {
             &paragraph,
             NSRange::new(0, length),
         );
-        if let Some(dot) = dot {
+        for dot in dots {
             text.addAttribute_value_range(
                 NSForegroundColorAttributeName,
-                &NSColor::systemRedColor(),
+                &NSColor::redColor(),
                 NSRange::new(dot, 1),
             );
         }

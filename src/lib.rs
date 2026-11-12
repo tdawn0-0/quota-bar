@@ -443,19 +443,35 @@ fn keep_last(previous: Vec<Source>, mut source: Source) -> Source {
 #[cfg(target_os = "macos")]
 fn macos_tray_title(store: Store) -> String {
     let sources = store.sources.get();
+    let forced = std::env::var_os("QUOTA_BAR_FORCE_CRITICAL").is_some();
     let mut top = Vec::new();
     let mut bottom = Vec::new();
     for provider in shown_providers(store) {
         let source = sources.iter().find(|source| source.short == provider.short);
         let five = source.and_then(|source| window_remaining(source, true));
         let week = source.and_then(|source| window_remaining(source, false));
-        let segment = format!("{}{}", provider.short, tray_value(five));
+        let mut segment = format!("{}{}", provider.short, tray_value(five));
+        let weekly = tray_value(week);
+        let low = forced
+            || source
+                .and_then(Source::headline)
+                .is_some_and(|left| left < 15.0);
+        // The dot goes in the second line's empty first cells, under the
+        // provider's name. When the weekly number fills the column, both
+        // lines get one more cell so the dot does not shift the next one.
+        if low && weekly.chars().count() >= segment.chars().count() {
+            segment.push(' ');
+        }
         let width = segment.chars().count();
-        top.push(segment);
-        bottom.push(format!("{:>width$}", tray_value(week)));
+        let mut weekly = format!("{weekly:>width$}");
+        if low {
+            weekly.replace_range(0..1, "●");
+        }
+        top.push(format!("{segment:<width$}"));
+        bottom.push(weekly);
     }
     if top.is_empty() {
-        return "额度".to_owned();
+        return tr("额度", "Quota").to_owned();
     }
     format!("{}\n{}", top.join(" "), bottom.join(" "))
 }
@@ -766,17 +782,6 @@ fn shown_providers(store: Store) -> Vec<&'static quota::Provider> {
     shown
 }
 
-/// Whether any provider shown in the menu bar is under 15%.
-fn critical(store: Store) -> bool {
-    if std::env::var_os("QUOTA_BAR_FORCE_CRITICAL").is_some() {
-        return true;
-    }
-    let sources = store.sources.get();
-    sources
-        .iter()
-        .any(|source| source.headline().is_some_and(|left| left < 15.0))
-}
-
 fn provider_menu(store: Store) -> MenuItem {
     let config = store.config.get();
     MenuItem::submenu(
@@ -848,11 +853,8 @@ fn set_tray_menu(store: Store) {
     // the compact monospaced, right-aligned, icon-less item right after.
     #[cfg(target_os = "macos")]
     set_timeout(Duration::from_millis(80), move || {
-        let critical = critical(store);
         // The task is queued; dropping the future only drops its result.
-        drop(run_on_main_thread(move || {
-            macos_tray::apply(&macos_title, critical)
-        }));
+        drop(run_on_main_thread(move || macos_tray::apply(&macos_title)));
     });
 }
 
