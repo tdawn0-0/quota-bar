@@ -10,15 +10,17 @@
 
 #![cfg(target_os = "macos")]
 
+use objc2::AnyThread;
 use objc2::MainThreadMarker;
 use objc2::Message;
+use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2_app_kit::{
     NSApplication, NSButton, NSCellImagePosition, NSColor, NSFont, NSFontAttributeName,
-    NSFontWeightRegular, NSForegroundColorAttributeName, NSMutableParagraphStyle,
+    NSFontWeightRegular, NSForegroundColorAttributeName, NSImage, NSMutableParagraphStyle,
     NSParagraphStyleAttributeName, NSTextAlignment, NSView,
 };
-use objc2_foundation::{NSMutableAttributedString, NSRange, NSString};
+use objc2_foundation::{NSMutableAttributedString, NSPoint, NSRange, NSSize, NSString};
 
 /// Applies `title` (two lines, a `\n` between them) to the app's status item.
 pub fn apply(title: &str) {
@@ -55,6 +57,7 @@ fn find_button(view: &NSView) -> Option<Retained<NSButton>> {
     None
 }
 
+#[allow(deprecated)]
 fn style(button: &NSButton, title: &str) {
     // No image at all: clearing it removes the icon-sized gap.
     button.setImage(None);
@@ -64,12 +67,14 @@ fn style(button: &NSButton, title: &str) {
     let length = title.encode_utf16().count();
     let paragraph = NSMutableParagraphStyle::new();
     paragraph.setAlignment(NSTextAlignment::Right);
+    paragraph.setMinimumLineHeight(9.0);
+    paragraph.setMaximumLineHeight(9.0);
     // SAFETY: the attribute names are AppKit's, their values are the matching
     // objects, and the range is within the string.
     unsafe {
         text.addAttribute_value_range(
             NSFontAttributeName,
-            &NSFont::monospacedSystemFontOfSize_weight(9.5, NSFontWeightRegular),
+            &NSFont::monospacedSystemFontOfSize_weight(9.0, NSFontWeightRegular),
             NSRange::new(0, length),
         );
         text.addAttribute_value_range(
@@ -83,5 +88,19 @@ fn style(button: &NSButton, title: &str) {
             NSRange::new(0, length),
         );
     }
-    button.setAttributedTitle(&text);
+
+    // Draw the two lines into an image: NSButtonCell centers an image in the
+    // status item's 22-point button, while a multi-line title is pinned near
+    // its top and does not share the menu bar's visual center.
+    let size: NSSize = unsafe { msg_send![&text, size] };
+    let image = NSImage::initWithSize(NSImage::alloc(), size);
+    image.lockFocus();
+    // SAFETY: the attributed string draws into the locked image context.
+    let _: () = unsafe { msg_send![&text, drawAtPoint: NSPoint::new(0.0, 0.0)] };
+    image.unlockFocus();
+    image.setTemplate(true);
+
+    button.setTitle(&NSString::new());
+    button.setImage(Some(&image));
+    button.setImagePosition(NSCellImagePosition::ImageOnly);
 }
