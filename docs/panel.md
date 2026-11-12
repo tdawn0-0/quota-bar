@@ -84,6 +84,10 @@ the fallback until you have resized it once.
 - On macOS, a second click on the tray item, a click in another app, or Escape
   closes it; the window's memory is released. Under GNOME, the tray label opens
   a menu and its **面板** item opens the panel.
+- On Linux, clicking another app leaves the panel open at its dragged position,
+  including on another monitor. This also applies after unpinning. Escape or
+  a second tray click still closes an unpinned panel; reopening lets the window
+  manager place a new window, since the GTK backend cannot restore coordinates.
 - Data refreshes at launch, every five minutes, with the **刷新** button, or
   from the tray's **刷新** item. A provider turned back on refreshes right away.
 - **置顶** pins the panel: it stays above other windows and outside clicks
