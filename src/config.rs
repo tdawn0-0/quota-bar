@@ -19,7 +19,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use nsh_core::prelude::data_dir;
 use serde_json::{Map, Value, json};
 
 /// What the file said when we last read or wrote it, so a running app can
@@ -28,6 +27,44 @@ static SEEN: Mutex<Option<String>> = Mutex::new(None);
 
 fn seen() -> std::sync::MutexGuard<'static, Option<String>> {
     SEEN.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+/// What the menu bar shows when several providers are on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MenuBarMode {
+    /// Every enabled provider, two lines.
+    #[default]
+    All,
+    /// The two with the least left, so the item fits beside a notch.
+    Compact,
+}
+
+/// The panel's language.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Language {
+    /// The system's UI language.
+    #[default]
+    Auto,
+    Zh,
+    En,
+}
+
+/// Which system notifications the app may show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Notify {
+    /// A provider fell below 15%.
+    pub low: bool,
+    /// A 5-hour window came back to full.
+    pub reset: bool,
+}
+
+impl Default for Notify {
+    fn default() -> Self {
+        Self {
+            low: true,
+            reset: true,
+        }
+    }
 }
 
 /// The size the user last resized the panel to, in points.
@@ -45,6 +82,9 @@ pub struct Config {
     /// being written to the file: installing one later finds it on again.
     hidden: BTreeSet<String>,
     panel: Option<PanelSize>,
+    menu_bar: MenuBarMode,
+    language: Language,
+    notify: Notify,
 }
 
 impl Config {
@@ -78,6 +118,36 @@ impl Config {
 
     pub fn set_panel(&mut self, size: PanelSize) {
         self.panel = Some(size);
+    }
+
+    pub fn menu_bar(&self) -> MenuBarMode {
+        self.menu_bar
+    }
+
+    pub fn set_menu_bar(&mut self, mode: MenuBarMode) {
+        self.menu_bar = mode;
+    }
+
+    pub fn language(&self) -> Language {
+        self.language
+    }
+
+    pub fn set_language(&mut self, language: Language) {
+        self.language = language;
+    }
+
+    pub fn notify(&self) -> Notify {
+        self.notify
+    }
+
+    pub fn set_notify(&mut self, notify: Notify) {
+        self.notify = notify;
+    }
+
+    /// Whether a config file exists: a first run has none, and shows the
+    /// panel once so the app does not look like it failed to start.
+    pub fn exists() -> bool {
+        path().is_some_and(|path| path.is_file())
     }
 
     /// Reads the file; every provider is on when there is none. A file that
@@ -156,12 +226,47 @@ impl Config {
         if let Some(panel) = self.panel {
             value["panel"] = json!({ "width": panel.width, "height": panel.height });
         }
+        if self.menu_bar == MenuBarMode::Compact {
+            value["menuBar"] = json!("compact");
+        }
+        match self.language {
+            Language::Auto => {}
+            Language::Zh => value["language"] = json!("zh"),
+            Language::En => value["language"] = json!("en"),
+        }
+        if self.notify != Notify::default() {
+            value["notify"] = json!({ "low": self.notify.low, "reset": self.notify.reset });
+        }
         value
     }
 
     fn parse(text: &str) -> Result<Self, String> {
         let value: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
         let mut config = Self::default();
+        if let Some(mode) = value.get("menuBar") {
+            config.menu_bar = match mode.as_str() {
+                Some("all") => MenuBarMode::All,
+                Some("compact") => MenuBarMode::Compact,
+                _ => return Err("menuBar is not \"all\" or \"compact\"".to_owned()),
+            };
+        }
+        if let Some(language) = value.get("language") {
+            config.language = match language.as_str() {
+                Some("auto") => Language::Auto,
+                Some("zh") => Language::Zh,
+                Some("en") => Language::En,
+                _ => return Err("language is not \"auto\", \"zh\" or \"en\"".to_owned()),
+            };
+        }
+        if let Some(notify) = value.get("notify") {
+            let notify = notify
+                .as_object()
+                .ok_or_else(|| "notify is not an object".to_owned())?;
+            config.notify = Notify {
+                low: notify.get("low").and_then(Value::as_bool).unwrap_or(true),
+                reset: notify.get("reset").and_then(Value::as_bool).unwrap_or(true),
+            };
+        }
         if let Some(panel) = value.get("panel").filter(|panel| !panel.is_null()) {
             let width = panel.get("width").and_then(Value::as_f64);
             let height = panel.get("height").and_then(Value::as_f64);
@@ -194,18 +299,39 @@ impl Config {
     }
 }
 
-/// `$QUOTA_BAR_CONFIG`, else `config.json` in the app's data directory,
-/// else `~/.config/quota-bar/config.json` when the host keeps no files.
+/// The app's data directory, without the reactive store (`data_dir` needs
+/// the app running; the single-instance lock is taken before that).
+pub fn dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)?;
+    #[cfg(target_os = "macos")]
+    {
+        Some(home.join("Library/Application Support/bar.jyeu.quota"))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Some(
+            std::env::var_os("XDG_DATA_HOME")
+                .filter(|dir| !dir.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".local/share"))
+                .join("bar.jyeu.quota"),
+        )
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = home;
+        None
+    }
+}
+
+/// `$QUOTA_BAR_CONFIG`, else `config.json` in the app's data directory.
 pub fn path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("QUOTA_BAR_CONFIG").filter(|path| !path.is_empty()) {
         return Some(PathBuf::from(path));
     }
-    if let Some(dir) = data_dir() {
-        return Some(dir.join("config.json"));
-    }
-    std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(|home| PathBuf::from(home).join(".config/quota-bar/config.json"))
+    dir().map(|dir| dir.join("config.json"))
 }
 
 #[cfg(test)]

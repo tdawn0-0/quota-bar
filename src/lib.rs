@@ -7,11 +7,13 @@
 //! one tray item and a few kilobytes of state.
 
 mod config;
+mod i18n;
 #[cfg(target_os = "macos")]
 mod macos_tray;
 mod quota;
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -24,11 +26,13 @@ use nsh_core::element::desktop::{
     MenuItem, WindowRef, current_window, open_window, quit, set_tray, tray, window,
 };
 use nsh_core::geometry::{Bounds, Points, point, px, relative, size};
+use nsh_core::notifications::Notification;
 #[cfg(target_os = "macos")]
 use nsh_core::platform::Lifecycle;
 use nsh_core::prelude::*;
 use nsh_core::time::unix_ms;
 
+use i18n::tr;
 use quota::Source;
 
 const PANEL_WIDTH: f32 = 344.0;
@@ -49,7 +53,14 @@ const TRAY_ICON: &str = "data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/20
 #[cfg(target_os = "linux")]
 const TRAY_ICON: &str = "data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Crect x=%272.5%27 y=%279%27 width=%272.5%27 height=%275%27 rx=%271%27/%3E%3Crect x=%276.75%27 y=%275.5%27 width=%272.5%27 height=%278.5%27 rx=%271%27/%3E%3Crect x=%2711%27 y=%272%27 width=%272.5%27 height=%2712%27 rx=%271%27/%3E%3C/svg%3E";
 
+/// The single-instance socket, made before the app starts.
+#[cfg(unix)]
+static INSTANCE: std::sync::Mutex<Option<std::os::unix::net::UnixListener>> =
+    std::sync::Mutex::new(None);
+
 thread_local! {
+    /// When the background refresh last ran, to notice a slept machine.
+    static LAST_TICK: Cell<f64> = const { Cell::new(0.0) };
     /// The open panel, so a second tray click closes it.
     static PANEL: RefCell<Option<WindowRef>> = const { RefCell::new(None) };
     /// When it opened, so activation that arrives late does not close it.
@@ -80,6 +91,12 @@ struct Store {
     /// Bumped whenever `sources` changes. A window's content is made once,
     /// so the open panel's cards follow this instead of the list itself.
     revision: Signal<u64>,
+    /// Whether the panel shows the settings instead of the cards.
+    settings: Signal<bool>,
+    /// A newer release, when the update check found one.
+    update: Signal<Option<String>>,
+    /// Whether the login item is installed.
+    autostart: Signal<bool>,
     /// Linux tray hosts can miss a label set before they start; the label is
     /// sent once more after startup.
     #[cfg(target_os = "linux")]
@@ -93,20 +110,73 @@ fn native(registry: &mut Registry) {
 
 #[component]
 pub fn App() -> impl IntoElement {
+    let config = load_config();
+    i18n::choose(match config.language() {
+        config::Language::Zh => Some(i18n::Lang::Zh),
+        config::Language::En => Some(i18n::Lang::En),
+        config::Language::Auto => None,
+    });
     let store = Store {
         sources: signal(Vec::<Source>::new()),
         updated: signal(0.0_f64),
         busy: signal(false),
         pending: signal(false),
-        config: signal(load_config()),
+        config: signal(config),
         pinned: signal(false),
         revision: signal(0_u64),
+        settings: signal(false),
+        update: signal(None::<String>),
+        autostart: signal(autostart_enabled()),
         #[cfg(target_os = "linux")]
         tray_ready: signal(false),
     };
 
     // One fetch at launch, then only on demand.
     refresh(store);
+
+    // A second launch opens the running instance's panel instead of adding a
+    // second tray item (where the platform reports it).
+    spawn(async move {
+        loop {
+            let _launch = next_second_instance().await;
+            show_panel(store);
+        }
+    });
+
+    // And where it doesn't (a second copy of the binary exits on the lock),
+    // its connection is the request to show the panel.
+    #[cfg(unix)]
+    if let Some(listener) = instance_listener() {
+        let listener = std::sync::Arc::new(listener);
+        spawn(async move {
+            loop {
+                let listener = std::sync::Arc::clone(&listener);
+                match blocking(move || listener.accept()).await {
+                    Ok(_) => show_panel(store),
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+
+    // A first run has no config and no window: show the panel once, so
+    // double-clicking the app does not look like nothing happened.
+    if !config::Config::exists() && std::env::var_os("QUOTA_BAR_OPEN_PANEL").is_none() {
+        set_timeout(Duration::from_millis(1200), move || show_panel(store));
+    }
+
+    // A newer release matters most when an upstream endpoint changes.
+    if std::env::var_os("QUOTA_BAR_NO_UPDATE").is_none() {
+        set_timeout(Duration::from_secs(8), move || {
+            spawn(async move {
+                if let Ok(tag) = quota::latest_release().await {
+                    if quota::is_newer(&tag, &app_version()) {
+                        store.update.set(Some(tag));
+                    }
+                }
+            });
+        });
+    }
 
     effect(move || set_tray_menu(store));
 
@@ -138,7 +208,18 @@ pub fn App() -> impl IntoElement {
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|secs| *secs >= 5)
         .unwrap_or(300);
-    set_interval(Duration::from_secs(interval), move || refresh(store));
+    LAST_TICK.with(|tick| tick.set(unix_ms()));
+    set_interval(Duration::from_secs(interval), move || {
+        // A long gap means the machine slept (or the app was suspended):
+        // give Wi-Fi a moment before asking the network again.
+        let now = unix_ms();
+        let gap = now - LAST_TICK.with(|tick| tick.replace(now));
+        if gap > (interval as f64 * 1.5 + 15.0) * 1000.0 {
+            set_timeout(Duration::from_secs(4), move || refresh(store));
+        } else {
+            refresh(store);
+        }
+    });
 
     // `QUOTA_BAR_OPEN_PANEL=1` opens the panel at launch, for screenshots;
     // `QUOTA_BAR_OPEN_DELAY_MS` waits for the first fetch before opening it.
@@ -156,6 +237,42 @@ pub fn App() -> impl IntoElement {
     // The main window stays hidden (`nsh.json` `defaultVisible: false`); it
     // only exists so the tray has an owner. The panel is a popup of its own.
     view().w_full().h_full()
+}
+
+/// Ends this process when another copy already owns the tray item: two
+/// copies would put two status items in the menu bar. A Unix socket in the
+/// data directory is the lock; the first process keeps it for its lifetime.
+pub fn ensure_single_instance() {
+    #[cfg(unix)]
+    {
+        use std::os::unix::net::{UnixListener, UnixStream};
+        let Some(dir) = config::dir() else {
+            return;
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("instance.sock");
+        if UnixStream::connect(&path).is_ok() {
+            eprintln!("[quota-bar] already running");
+            std::process::exit(0);
+        }
+        let _ = std::fs::remove_file(&path);
+        match UnixListener::bind(&path) {
+            Ok(listener) => {
+                // Kept for the process's life; the app takes it to open its
+                // panel when someone launches it again.
+                if let Ok(mut slot) = INSTANCE.lock() {
+                    *slot = Some(listener);
+                }
+            }
+            Err(error) => eprintln!("[quota-bar] instance lock: {error}"),
+        }
+    }
+}
+
+/// The lock's socket, for the app to accept later launches from.
+#[cfg(unix)]
+pub fn instance_listener() -> Option<std::os::unix::net::UnixListener> {
+    INSTANCE.lock().ok().and_then(|mut slot| slot.take())
 }
 
 /// Reads the config, then hides providers this machine does not have unless
@@ -262,6 +379,7 @@ fn finish(store: Store, left: &Cell<usize>) {
     prune(store);
     store.updated.set(unix_ms());
     store.busy.set(false);
+    notify_crossings(store);
     if store.pending.get() {
         refresh(store);
     }
@@ -324,14 +442,10 @@ fn keep_last(previous: Vec<Source>, mut source: Source) -> Source {
 /// MacOS only; the status item is styled with it after NSH sets the tray.
 #[cfg(target_os = "macos")]
 fn macos_tray_title(store: Store) -> String {
-    let config = store.config.get();
     let sources = store.sources.get();
     let mut top = Vec::new();
     let mut bottom = Vec::new();
-    for provider in quota::PROVIDERS
-        .iter()
-        .filter(|provider| config.enabled(provider.id))
-    {
+    for provider in shown_providers(store) {
         let source = sources.iter().find(|source| source.short == provider.short);
         let five = source.and_then(|source| window_remaining(source, true));
         let week = source.and_then(|source| window_remaining(source, false));
@@ -354,7 +468,6 @@ fn tray_value(value: Option<f64>) -> String {
 }
 
 /// The tightest 5-hour (or rolling) window, or the tightest weekly one.
-#[cfg(target_os = "macos")]
 fn window_remaining(source: &Source, five_hour: bool) -> Option<f64> {
     source
         .metrics
@@ -377,22 +490,23 @@ fn tray_runs(store: Store) -> Vec<TrayTitleRun> {
     if !store.tray_ready.get() {
         return Vec::new();
     }
-    let config = store.config.get();
     let sources = store.sources.get();
     let mut runs = Vec::new();
-    for provider in quota::PROVIDERS
-        .iter()
-        .filter(|provider| config.enabled(provider.id))
-    {
+    for provider in shown_providers(store) {
         if !runs.is_empty() {
             runs.push(TrayTitleRun::new("  "));
         }
         let source = sources.iter().find(|source| source.short == provider.short);
+        let warning = source
+            .and_then(Source::headline)
+            .is_some_and(|remaining| remaining < 15.0);
         match source.and_then(Source::headline) {
             Some(remaining) => {
                 runs.push(TrayTitleRun::new(format!(
-                    "{} {:.0}%",
-                    provider.short, remaining
+                    "{}{} {:.0}%",
+                    provider.short,
+                    if warning { "!" } else { "" },
+                    remaining
                 )));
             }
             None => runs.push(TrayTitleRun::new(provider.short.to_owned())),
@@ -400,7 +514,7 @@ fn tray_runs(store: Store) -> Vec<TrayTitleRun> {
     }
     // An empty title would leave no menu bar item to click.
     if runs.is_empty() {
-        runs.push(TrayTitleRun::new("额度"));
+        runs.push(TrayTitleRun::new(tr("额度", "Quota")));
     }
     runs
 }
@@ -412,11 +526,255 @@ fn enabled_shorts(config: &config::Config) -> String {
         .filter(|provider| config.enabled(provider.id))
         .map(|provider| provider.short)
         .collect();
-    if shorts.is_empty() {
-        "未选择来源".to_owned()
-    } else {
-        shorts.join(" · ")
+    shorts.join(" · ")
+}
+
+const RELEASES_URL: &str = "https://github.com/tdawn0-0/quota-bar/releases/latest";
+
+fn app_version() -> String {
+    serde_json::from_str::<serde_json::Value>(include_str!("../nsh.json"))
+        .ok()
+        .and_then(|value| {
+            value
+                .get("version")
+                .and_then(|version| version.as_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned())
+}
+
+fn open_url(url: &'static str) {
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(target_os = "linux")]
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+}
+
+fn save_config(store: Store, config: config::Config) {
+    if let Err(error) = config.save() {
+        eprintln!("[quota-bar] config: {error}");
     }
+    store.config.set(config);
+}
+
+fn set_menu_bar(store: Store, mode: config::MenuBarMode) {
+    let mut config = store.config.get();
+    config.set_menu_bar(mode);
+    save_config(store, config);
+}
+
+fn set_notify(store: Store, notify: config::Notify) {
+    let mut config = store.config.get();
+    config.set_notify(notify);
+    save_config(store, config);
+}
+
+fn set_language(store: Store, language: config::Language) {
+    let mut config = store.config.get();
+    config.set_language(language);
+    save_config(store, config);
+    i18n::choose(match language {
+        config::Language::Zh => Some(i18n::Lang::Zh),
+        config::Language::En => Some(i18n::Lang::En),
+        config::Language::Auto => None,
+    });
+    // Every string was made in the old language: make them again.
+    let pinned = store.pinned.get();
+    close_panel(store);
+    open_panel(store, None, pinned);
+}
+
+/// Brings the panel forward, opening it when it is closed.
+fn show_panel(store: Store) {
+    if let Some(panel) = PANEL.with(|slot| slot.borrow().clone()) {
+        if panel.state().map(|state| state.visible).unwrap_or(false) {
+            panel.focus();
+            return;
+        }
+    }
+    open_panel(store, None, false);
+}
+
+/// The login item: a LaunchAgent on macOS, an autostart entry on Linux.
+fn autostart_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+    #[cfg(target_os = "macos")]
+    {
+        Some(home.join("Library/LaunchAgents/bar.jyeu.quota.plist"))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let config = std::env::var_os("XDG_CONFIG_HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"));
+        Some(config.join("autostart/quota-bar.desktop"))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = home;
+        None
+    }
+}
+
+fn autostart_enabled() -> bool {
+    autostart_path().is_some_and(|path| path.is_file())
+}
+
+fn set_autostart(on: bool) -> Result<(), String> {
+    let path = autostart_path().ok_or("no home directory")?;
+    if !on {
+        return match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("{}: {error}", path.display())),
+        };
+    }
+    let exe = std::env::current_exe().map_err(|error| error.to_string())?;
+    let exe = exe.to_string_lossy();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+    }
+    #[cfg(target_os = "macos")]
+    let body = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>bar.jyeu.quota</string>
+  <key>ProgramArguments</key><array><string>{exe}</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>ProcessType</key><string>Interactive</string>
+</dict>
+</plist>
+"#
+    );
+    #[cfg(target_os = "linux")]
+    let body = format!(
+        "[Desktop Entry]\nType=Application\nName=Quota Bar\nExec={exe}\nX-GNOME-Autostart-enabled=true\n"
+    );
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let body = String::new();
+    std::fs::write(&path, body).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+/// Runs one provider again, leaving the others alone.
+fn retry_source(store: Store, short: &'static str) {
+    let Some(provider) = quota::Provider::by_short(short) else {
+        return;
+    };
+    let now = unix_ms() as u64;
+    match &provider.kind {
+        quota::Kind::Blocking(collect) => {
+            let collect = *collect;
+            spawn(async move {
+                if let Ok(source) = blocking(move || collect(now)).await {
+                    upsert(store, source);
+                    store.updated.set(unix_ms());
+                    notify_crossings(store);
+                }
+            });
+        }
+        quota::Kind::Async(collect) => {
+            let collect = *collect;
+            spawn(async move {
+                upsert(store, collect().await);
+                store.updated.set(unix_ms());
+                notify_crossings(store);
+            });
+        }
+    }
+}
+
+/// Warns when a provider falls under 15% and when a 5-hour window is back to
+/// full, once per crossing.
+fn notify_crossings(store: Store) {
+    let notify = store.config.get().notify();
+    if !notify.low && !notify.reset {
+        return;
+    }
+    thread_local! {
+        static PREV: RefCell<BTreeMap<&'static str, Option<f64>>> = const { RefCell::new(BTreeMap::new()) };
+    }
+    let sources = store.sources.get();
+    PREV.with(|previous| {
+        let mut previous = previous.borrow_mut();
+        for source in &sources {
+            let five = window_remaining(source, true);
+            let before = previous.insert(source.short, five).flatten();
+            let (Some(before), Some(now)) = (before, five) else {
+                continue;
+            };
+            if notify.low && before >= 15.0 && now < 15.0 {
+                send_notification(
+                    format!("quota-low-{}", source.short),
+                    format!("{} {}", source.title, tr("额度不足", "is running low")),
+                    if i18n::is_english() {
+                        format!("{now:.0}% left")
+                    } else {
+                        format!("仅剩 {now:.0}%，注意安排")
+                    },
+                );
+            }
+            if notify.reset && before < 99.5 && now >= 99.5 {
+                send_notification(
+                    format!("quota-reset-{}", source.short),
+                    format!("{} {}", source.title, tr("额度已恢复", "is back")),
+                    tr(
+                        "会话额度已回满，可以继续干活了。",
+                        "Session quota is back to full. Back to work.",
+                    )
+                    .to_owned(),
+                );
+            }
+        }
+    });
+}
+
+fn send_notification(id: String, title: String, body: String) {
+    thread_local! {
+        static ASKED: Cell<bool> = const { Cell::new(false) };
+    }
+    let ask = !ASKED.with(|asked| asked.replace(true));
+    spawn(async move {
+        if ask {
+            let _ = request_notification_permission().await;
+        }
+        let _ = show_notification(Notification::new(id, title, body)).await;
+    });
+}
+
+/// The providers the menu bar shows: all, or the two with the least left.
+fn shown_providers(store: Store) -> Vec<&'static quota::Provider> {
+    let config = store.config.get();
+    let mut shown: Vec<&'static quota::Provider> = quota::PROVIDERS
+        .iter()
+        .filter(|provider| config.enabled(provider.id))
+        .collect();
+    if config.menu_bar() == config::MenuBarMode::Compact && shown.len() > 2 {
+        let sources = store.sources.get();
+        let left = |provider: &&quota::Provider| {
+            sources
+                .iter()
+                .find(|source| source.short == provider.short)
+                .and_then(Source::headline)
+                .unwrap_or(f64::MAX)
+        };
+        shown.sort_by(|a, b| left(a).total_cmp(&left(b)));
+        shown.truncate(2);
+        shown.sort_by_key(|provider| quota::Provider::position(provider.short));
+    }
+    shown
+}
+
+/// Whether any provider shown in the menu bar is under 15%.
+fn critical(store: Store) -> bool {
+    if std::env::var_os("QUOTA_BAR_FORCE_CRITICAL").is_some() {
+        return true;
+    }
+    let sources = store.sources.get();
+    sources
+        .iter()
+        .any(|source| source.headline().is_some_and(|left| left < 15.0))
 }
 
 fn provider_menu(store: Store) -> MenuItem {
@@ -454,6 +812,10 @@ fn set_tray_menu(store: Store) {
     let config = store.config.get();
     #[cfg(target_os = "macos")]
     let macos_title = macos_tray_title(store);
+    #[cfg(target_os = "macos")]
+    if std::env::var_os("QUOTA_BAR_DEBUG").is_some() {
+        eprintln!("[quota-bar] tray title {macos_title:?}");
+    }
     // NSH sizes the status item to its title; give macOS the two-line title
     // from the start so a long single-line one never widens it past the menu
     // bar. The AppKit pass below then sets the compact monospaced font.
@@ -465,7 +827,14 @@ fn set_tray_menu(store: Store) {
         tray()
             .icon(TRAY_ICON)
             .title(title)
-            .tooltip(format!("AI 额度：{}", enabled_shorts(&config)))
+            .tooltip(format!(
+                "{}：{}",
+                tr("AI 额度", "AI quota"),
+                match enabled_shorts(&config).as_str() {
+                    "" => tr("没有来源", "no providers"),
+                    shorts => shorts,
+                }
+            ))
             .on_click(move |event| toggle_panel(store, event.bounds, false))
             .menu([
                 MenuItem::new("刷新").on_select(move || refresh(store)),
@@ -479,8 +848,11 @@ fn set_tray_menu(store: Store) {
     // the compact monospaced, right-aligned, icon-less item right after.
     #[cfg(target_os = "macos")]
     set_timeout(Duration::from_millis(80), move || {
+        let critical = critical(store);
         // The task is queued; dropping the future only drops its result.
-        drop(run_on_main_thread(move || macos_tray::apply(&macos_title)));
+        drop(run_on_main_thread(move || {
+            macos_tray::apply(&macos_title, critical)
+        }));
     });
 }
 
@@ -726,9 +1098,9 @@ fn value_color(remaining: Option<f64>) -> AdaptiveColor {
 
 fn panel(store: Store) -> impl IntoElement {
     track_panel_size(store);
-    // A window's content is made once: plain elements would keep the cards
-    // from the moment it opened. The cards live in a reactive region keyed
-    // on the list's revision, so every fetch that lands rebuilds them.
+    // A window's content is made once: the cards and the empty states live
+    // in `when` / `each` regions so a fetch that lands swaps them, and the
+    // cards follow the list's revision.
     view()
         .flex_1()
         .flex_col()
@@ -744,19 +1116,26 @@ fn panel(store: Store) -> impl IntoElement {
         .child(
             scroll().flex_1().w_full().child(
                 view()
-                    .flex_row()
-                    .flex_wrap()
+                    .flex_col()
                     .w_full()
                     .gap(px(8.0))
                     .px(px(12.0))
                     .pb(px(12.0))
-                    .child(each(
-                        move || {
-                            let _ = store.revision.get();
-                            store.sources.get()
-                        },
-                        move |source| (store.revision.get(), source.short),
-                        move |source, _| card(source.get()),
+                    .child(when(
+                        move || store.settings.get(),
+                        move || settings_body(store),
+                    ))
+                    .child(when(
+                        move || !store.settings.get() && loading(store),
+                        move || skeleton(store),
+                    ))
+                    .child(when(
+                        move || !store.settings.get() && empty(store),
+                        move || empty_state(store),
+                    ))
+                    .child(when(
+                        move || !store.settings.get() && !loading(store) && !empty(store),
+                        move || cards(store),
                     )),
             ),
         )
@@ -797,6 +1176,122 @@ fn resize_grip(edge: ResizeEdge) -> impl IntoElement {
     }
 }
 
+fn loading(store: Store) -> bool {
+    store.sources.get().is_empty() && (store.busy.get() || store.updated.get() <= 0.0)
+}
+
+fn empty(store: Store) -> bool {
+    let sources = store.sources.get();
+    sources.is_empty() && !store.busy.get() && store.updated.get() > 0.0
+}
+
+/// The cards, in the order the providers have, wrapping into columns.
+fn cards(store: Store) -> impl IntoElement {
+    view()
+        .flex_row()
+        .flex_wrap()
+        .w_full()
+        .gap(px(8.0))
+        .child(each(
+            move || {
+                let _ = store.revision.get();
+                store.sources.get()
+            },
+            move |source| (store.revision.get(), source.short),
+            move |source, _| card(store, source.get()),
+        ))
+}
+
+/// The first fetch has not answered yet.
+fn skeleton(_store: Store) -> impl IntoElement {
+    view()
+        .flex_col()
+        .w_full()
+        .gap(px(8.0))
+        .child(
+            text(tr("正在读取额度…", "Reading quotas…"))
+                .text_size(px(11.0))
+                .text_color(move || theme().muted_foreground),
+        )
+        .children((0..3).map(|_| {
+            view()
+                .w_full()
+                .h(px(96.0))
+                .rounded(px(10.0))
+                .bg(card_fill())
+                .border(px(1.0))
+                .border_color(glass_border())
+                .child(
+                    view().w_full().h(px(10.0)).p(px(11.0)).child(
+                        view()
+                            .w(px(88.0))
+                            .h(px(8.0))
+                            .rounded(px(4.0))
+                            .bg(move || theme().muted),
+                    ),
+                )
+        }))
+}
+
+/// No provider answered (or every one is off): a way back in.
+fn empty_state(store: Store) -> impl IntoElement {
+    view()
+        .flex_col()
+        .w_full()
+        .gap(px(10.0))
+        .p(px(12.0))
+        .rounded(px(10.0))
+        .bg(card_fill())
+        .border(px(1.0))
+        .border_color(glass_border())
+        .child(
+            text(tr("还没有可用的来源", "No providers yet"))
+                .text_size(px(12.0))
+                .font_weight(FontWeight::MEDIUM),
+        )
+        .child(
+            text(tr(
+                "先在本机登录 Claude Code、Codex 等工具；也可以直接打开一个来源：",
+                "Sign in to Claude Code, Codex and the like here, or turn one on:",
+            ))
+            .text_size(px(10.0))
+            .text_color(move || theme().muted_foreground),
+        )
+        .child(
+            view()
+                .flex_row()
+                .flex_wrap()
+                .gap(px(6.0))
+                .children(quota::PROVIDERS.iter().map(|provider| {
+                    choice(
+                        provider.title,
+                        move || store.config.get().enabled(provider.id),
+                        move || {
+                            set_provider(
+                                store,
+                                provider.id,
+                                !store.config.get().enabled(provider.id),
+                            )
+                        },
+                    )
+                })),
+        )
+        .child(
+            view()
+                .px(px(9.0))
+                .py(px(4.0))
+                .rounded(px(6.0))
+                .bg(move || theme().secondary)
+                .on_press(move || refresh(store))
+                .child(
+                    text(tr("刷新", "Refresh"))
+                        .text_size(px(11.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(move || theme().secondary_foreground),
+                ),
+        )
+}
+
 fn header(store: Store) -> impl IntoElement {
     view()
         .flex_row()
@@ -809,84 +1304,111 @@ fn header(store: Store) -> impl IntoElement {
         .gap(px(8.0))
         .window_drag(true)
         .child(
-            text("AI 额度")
-                .text_size(px(13.0))
-                .font_weight(FontWeight::SEMIBOLD),
+            text(move || {
+                if store.settings.get() {
+                    tr("设置", "Settings")
+                } else {
+                    tr("AI 额度", "AI Quota")
+                }
+            })
+            .text_size(px(13.0))
+            .font_weight(FontWeight::SEMIBOLD),
         )
         .child(
             view()
                 .flex_row()
                 .items_center()
                 .gap(px(8.0))
-                .child(
-                    text(move || {
-                        let at = store.updated.get();
-                        if at <= 0.0 {
-                            "未刷新".to_owned()
-                        } else {
-                            format!("{} 秒前", (((unix_ms() - at) / 1000.0) as u64).min(3600))
-                        }
-                    })
-                    .text_size(px(11.0))
-                    .text_color(move || theme().muted_foreground),
-                )
-                .child(
-                    view()
-                        .px(px(9.0))
-                        .py(px(4.0))
-                        .rounded(px(6.0))
-                        .bg(move || {
-                            if store.busy.get() {
-                                theme().muted
-                            } else {
-                                theme().secondary
-                            }
-                        })
-                        .on_press(move || refresh(store))
-                        .child(
-                            text(move || {
+                .child(when(
+                    move || !store.settings.get() && store.updated.get() > 0.0,
+                    move || {
+                        text(move || i18n::ago(store.updated.get()))
+                            .text_size(px(11.0))
+                            .text_color(move || theme().muted_foreground)
+                    },
+                ))
+                .child(when(
+                    move || !store.settings.get(),
+                    move || {
+                        view()
+                            .px(px(9.0))
+                            .py(px(4.0))
+                            .rounded(px(6.0))
+                            .bg(move || {
                                 if store.busy.get() {
-                                    "刷新中"
+                                    theme().muted
                                 } else {
-                                    "刷新"
+                                    theme().secondary
                                 }
                             })
-                            .text_size(px(11.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(move || theme().secondary_foreground),
-                        ),
-                )
-                .child(
-                    view()
-                        .px(px(9.0))
-                        .py(px(4.0))
-                        .rounded(px(6.0))
-                        .bg(move || {
-                            if store.pinned.get() {
-                                theme().secondary
-                            } else {
-                                theme().muted
-                            }
-                        })
-                        .on_press(move || toggle_pin(store))
-                        .child(
-                            text(move || {
+                            .on_press(move || refresh(store))
+                            .child(
+                                text(move || {
+                                    if store.busy.get() {
+                                        tr("刷新中", "Refreshing")
+                                    } else {
+                                        tr("刷新", "Refresh")
+                                    }
+                                })
+                                .text_size(px(11.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(move || theme().secondary_foreground),
+                            )
+                    },
+                ))
+                .child(when(
+                    move || !store.settings.get(),
+                    move || {
+                        view()
+                            .px(px(9.0))
+                            .py(px(4.0))
+                            .rounded(px(6.0))
+                            .bg(move || {
                                 if store.pinned.get() {
-                                    "已置顶"
+                                    theme().secondary
                                 } else {
-                                    "置顶"
+                                    theme().muted
                                 }
                             })
-                            .text_size(px(11.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(move || theme().secondary_foreground),
-                        ),
-                ),
+                            .on_press(move || toggle_pin(store))
+                            .child(
+                                text(move || {
+                                    if store.pinned.get() {
+                                        tr("已置顶", "Pinned")
+                                    } else {
+                                        tr("置顶", "Pin")
+                                    }
+                                })
+                                .text_size(px(11.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(move || theme().secondary_foreground),
+                            )
+                    },
+                ))
+                .child(when(
+                    move || store.settings.get(),
+                    move || {
+                        view()
+                            .px(px(9.0))
+                            .py(px(4.0))
+                            .rounded(px(6.0))
+                            .bg(move || theme().secondary)
+                            .on_press(move || store.settings.set(false))
+                            .child(
+                                text(tr("完成", "Done"))
+                                    .text_size(px(11.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(move || theme().secondary_foreground),
+                            )
+                    },
+                )),
         )
 }
 
-fn card(source: Source) -> impl IntoElement {
+/// The size of a card, and where its text goes.
+fn card(store: Store, source: Source) -> impl IntoElement {
     let error = !source.error.is_empty();
+    let short = source.short;
     view()
         .flex_col()
         .flex_1()
@@ -925,17 +1447,294 @@ fn card(source: Source) -> impl IntoElement {
                 .children(source.metrics.iter().map(metric_row)),
         )
         .child(
-            text(if error {
-                source.error.clone()
-            } else {
-                source.note.clone()
+            view()
+                .flex_row()
+                .items_start()
+                .justify_between()
+                .gap(px(6.0))
+                .child(
+                    text(if error {
+                        source.error.clone()
+                    } else {
+                        i18n::note(&source.note)
+                    })
+                    .flex_1()
+                    .text_size(px(10.0))
+                    .text_color(if error {
+                        rgb(RED).into()
+                    } else {
+                        theme().muted_foreground
+                    }),
+                )
+                .child(when(
+                    move || error,
+                    move || {
+                        view()
+                            .px(px(6.0))
+                            .py(px(2.0))
+                            .rounded(px(5.0))
+                            .bg(move || theme().muted)
+                            .on_press(move || retry_source(store, short))
+                            .child(
+                                text(tr("重试", "Retry"))
+                                    .text_size(px(10.0))
+                                    .text_color(move || theme().secondary_foreground),
+                            )
+                    },
+                )),
+        )
+}
+
+fn footer(store: Store) -> impl IntoElement {
+    view()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .w_full()
+        .px(px(14.0))
+        .py(px(9.0))
+        .border_t(px(1.0))
+        .border_color(move || theme().border)
+        .child(
+            view()
+                .px(px(7.0))
+                .py(px(3.0))
+                .rounded(px(6.0))
+                .on_press(move || store.settings.set(!store.settings.get()))
+                .child(
+                    text(move || {
+                        if store.settings.get() {
+                            tr("返回", "Back").to_owned()
+                        } else {
+                            let shorts = enabled_shorts(&store.config.get());
+                            if shorts.is_empty() {
+                                tr("来源", "Sources").to_owned()
+                            } else {
+                                shorts
+                            }
+                        }
+                    })
+                    .text_size(px(10.0))
+                    .text_color(move || theme().muted_foreground),
+                ),
+        )
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(when(
+                    move || store.update.get().is_some(),
+                    move || {
+                        view()
+                            .px(px(6.0))
+                            .py(px(2.0))
+                            .rounded(px(5.0))
+                            .bg(move || theme().secondary)
+                            .on_press(|| open_url(RELEASES_URL))
+                            .child(
+                                text(move || {
+                                    store
+                                        .update
+                                        .get()
+                                        .map(|tag| format!("v{tag}"))
+                                        .unwrap_or_default()
+                                })
+                                .text_size(px(10.0))
+                                .text_color(move || theme().secondary_foreground),
+                            )
+                    },
+                ))
+                .child(
+                    view()
+                        .px(px(9.0))
+                        .py(px(4.0))
+                        .rounded(px(6.0))
+                        .on_press(move || quit())
+                        .child(
+                            text(tr("退出", "Quit"))
+                                .text_size(px(11.0))
+                                .text_color(move || theme().muted_foreground),
+                        ),
+                ),
+        )
+}
+
+/// The settings page inside the panel: sources, menu bar, language, login
+/// item and notifications.
+fn settings_body(store: Store) -> impl IntoElement {
+    view()
+        .flex_col()
+        .w_full()
+        .gap(px(10.0))
+        .child(section_title(tr("来源", "Providers")))
+        .children(quota::PROVIDERS.iter().map(|provider| {
+            toggle_row(
+                provider.title,
+                move || store.config.get().enabled(provider.id),
+                move || set_provider(store, provider.id, !store.config.get().enabled(provider.id)),
+            )
+        }))
+        .child(divider())
+        .child(section_title(tr("菜单栏", "Menu bar")))
+        .child(
+            view()
+                .flex_row()
+                .gap(px(6.0))
+                .child(choice(
+                    tr("全部", "All"),
+                    move || store.config.get().menu_bar() == config::MenuBarMode::All,
+                    move || set_menu_bar(store, config::MenuBarMode::All),
+                ))
+                .child(choice(
+                    tr("紧凑", "Compact"),
+                    move || store.config.get().menu_bar() == config::MenuBarMode::Compact,
+                    move || set_menu_bar(store, config::MenuBarMode::Compact),
+                )),
+        )
+        .child(divider())
+        .child(section_title(tr("语言", "Language")))
+        .child(
+            view()
+                .flex_row()
+                .flex_wrap()
+                .gap(px(6.0))
+                .child(choice(
+                    tr("跟随系统", "System"),
+                    move || store.config.get().language() == config::Language::Auto,
+                    move || set_language(store, config::Language::Auto),
+                ))
+                .child(choice(
+                    "中文",
+                    move || store.config.get().language() == config::Language::Zh,
+                    move || set_language(store, config::Language::Zh),
+                ))
+                .child(choice(
+                    "English",
+                    move || store.config.get().language() == config::Language::En,
+                    move || set_language(store, config::Language::En),
+                )),
+        )
+        .child(divider())
+        .child(section_title(tr("其他", "More")))
+        .child(toggle_row(
+            tr("开机自启", "Launch at Login"),
+            move || store.autostart.get(),
+            move || {
+                let on = !store.autostart.get();
+                match set_autostart(on) {
+                    Ok(()) => store.autostart.set(on),
+                    Err(error) => eprintln!("[quota-bar] autostart: {error}"),
+                }
+            },
+        ))
+        .child(toggle_row(
+            tr("低额度提醒", "Low quota alerts"),
+            move || store.config.get().notify().low,
+            move || {
+                let mut notify = store.config.get().notify();
+                notify.low = !notify.low;
+                set_notify(store, notify);
+            },
+        ))
+        .child(toggle_row(
+            tr("恢复提醒", "Recovery alerts"),
+            move || store.config.get().notify().reset,
+            move || {
+                let mut notify = store.config.get().notify();
+                notify.reset = !notify.reset;
+                set_notify(store, notify);
+            },
+        ))
+        .child(
+            text(move || {
+                let version = app_version();
+                match store.update.get() {
+                    Some(tag) => format!("Quota Bar {version} · {} v{tag}", tr("新版", "update")),
+                    None => format!("Quota Bar {version}"),
+                }
             })
             .text_size(px(10.0))
-            .text_color(if error {
-                rgb(RED).into()
+            .text_color(move || theme().muted_foreground),
+        )
+}
+
+fn section_title(label: &'static str) -> impl IntoElement {
+    text(label)
+        .text_size(px(10.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(move || theme().muted_foreground)
+}
+
+fn divider() -> impl IntoElement {
+    view().w_full().h(px(1.0)).bg(move || theme().border)
+}
+
+fn toggle_row(
+    label: &'static str,
+    on: impl Fn() -> bool + 'static,
+    press: impl Fn() + 'static,
+) -> impl IntoElement {
+    let on: Rc<dyn Fn() -> bool> = Rc::new(on);
+    let (bg_on, text_on) = (Rc::clone(&on), Rc::clone(&on));
+    view()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .child(
+            text(label)
+                .text_size(px(11.0))
+                .text_color(move || theme().foreground),
+        )
+        .child(
+            view()
+                .px(px(9.0))
+                .py(px(3.0))
+                .rounded(px(6.0))
+                .bg(move || {
+                    if bg_on() {
+                        theme().secondary
+                    } else {
+                        theme().muted
+                    }
+                })
+                .on_press(press)
+                .child(
+                    text(move || {
+                        if text_on() {
+                            tr("开", "On")
+                        } else {
+                            tr("关", "Off")
+                        }
+                    })
+                    .text_size(px(10.0))
+                    .text_color(move || theme().secondary_foreground),
+                ),
+        )
+}
+
+/// A labelled pill: highlighted when `selected` is true.
+fn choice(
+    label: &'static str,
+    selected: impl Fn() -> bool + 'static,
+    press: impl Fn() + 'static,
+) -> impl IntoElement {
+    view()
+        .px(px(9.0))
+        .py(px(4.0))
+        .rounded(px(6.0))
+        .bg(move || {
+            if selected() {
+                theme().secondary
             } else {
-                theme().muted_foreground
-            }),
+                theme().muted
+            }
+        })
+        .on_press(press)
+        .child(
+            text(label)
+                .text_size(px(10.0))
+                .text_color(move || theme().secondary_foreground),
         )
 }
 
@@ -952,7 +1751,7 @@ fn metric_row(metric: &quota::Metric) -> impl IntoElement {
                 .justify_between()
                 .items_center()
                 .child(
-                    text(metric.label.clone())
+                    text(i18n::metric_label(&metric.label))
                         .text_size(px(11.0))
                         .text_color(move || theme().foreground),
                 )
@@ -982,38 +1781,9 @@ fn metric_row(metric: &quota::Metric) -> impl IntoElement {
                 ),
         )
         .child(
-            text(metric.detail.clone())
+            text(i18n::metric_detail(&metric.detail))
                 .text_size(px(10.0))
                 .text_color(move || theme().muted_foreground),
-        )
-}
-
-fn footer(store: Store) -> impl IntoElement {
-    view()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .w_full()
-        .px(px(14.0))
-        .py(px(9.0))
-        .border_t(px(1.0))
-        .border_color(move || theme().border)
-        .child(
-            text(move || enabled_shorts(&store.config.get()))
-                .text_size(px(10.0))
-                .text_color(move || theme().muted_foreground),
-        )
-        .child(
-            view()
-                .px(px(9.0))
-                .py(px(4.0))
-                .rounded(px(6.0))
-                .on_press(move || quit())
-                .child(
-                    text("退出")
-                        .text_size(px(11.0))
-                        .text_color(move || theme().muted_foreground),
-                ),
         )
 }
 

@@ -8,6 +8,7 @@ use nsh_platform_macos as platform;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn main() -> impl std::process::Termination {
     env_logger::init();
+    quota_bar::ensure_single_instance();
     platform::run_app(platform::AppSource::Rust(app_root()), app_options())
 }
 

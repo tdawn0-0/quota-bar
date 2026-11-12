@@ -32,7 +32,15 @@ signed in, keeps the numbers in memory, and stays out of the way.
 - **Honest colors.** Blue is healthy, bars turn amber below 40%, and anything
   below 15% turns red — including the number itself.
 - **Yours to trim.** Show only the providers you use; the choice is saved and
-  hidden providers are never fetched.
+  hidden providers are never fetched. Everything is also switchable from the
+  panel's own settings, no right-click hunting.
+- **Fits a notch.** The menu bar can show every provider or just the two with
+  the least left; a red dot marks anything under 15%.
+- **Speaks two languages.** English when the system asks for it, Chinese
+  otherwise (and a switch in the panel).
+- **Quiet but useful.** Optional alerts when a limit falls under 15% or a
+  5-hour window comes back, a login-item switch, and an update hint when a
+  release fixes a changed endpoint.
 
 ## Providers
 
@@ -59,10 +67,14 @@ cd quota-bar
 cargo run
 ```
 
-Build a signed macOS app bundle:
+Build the macOS app bundle. The script also drops NSH's unused microphone
+and speech-recognition descriptions, adds the app icon, and signs or notarizes
+when you give it an identity and a notarytool profile:
 
 ```sh
-nsh package --target macos --run
+scripts/package-macos.sh
+CODESIGN_IDENTITY="Developer ID Application: … (TEAMID)" \
+NOTARY_PROFILE=quota-bar scripts/package-macos.sh
 ```
 
 The packaged app is a menu bar app (`macos.activationPolicy: accessory`), so it
@@ -125,10 +137,13 @@ An entry can also be an object, leaving room for provider settings later:
 ```
 
 Resizing the panel writes the size it was left at back to the same file, so it
-opens that way next time:
+opens that way next time. The panel's settings write the rest:
 
 ```json
-"panel": { "width": 686, "height": 371 }
+"panel": { "width": 686, "height": 371 },
+"menuBar": "compact",          // all (default), or the two with the least left
+"language": "en",              // auto (default), zh, en
+"notify": { "low": true, "reset": true }  // under 15%, back to full
 ```
 
 Only providers you chose are written. A tool startup detection leaves off is
@@ -162,7 +177,9 @@ Debug switches for development and screenshots:
 | `QUOTA_BAR_PANEL_AT=x,y` | Place the panel (macOS) |
 | `QUOTA_BAR_REFRESH_SECS=15` | Faster refresh while testing (minimum 5) |
 | `QUOTA_BAR_CONFIG=path` | Use another config file |
-| `QUOTA_BAR_DEBUG=1` | Print the providers detection left enabled at startup |
+| `QUOTA_BAR_LANG=en` | Force English (`zh` for Chinese) |
+| `QUOTA_BAR_NO_UPDATE=1` | Skip the GitHub release check |
+| `QUOTA_BAR_DEBUG=1` | Print the providers detection left enabled and the tray title |
 
 More in [docs/development.md](docs/development.md).
 

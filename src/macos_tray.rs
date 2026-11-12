@@ -21,9 +21,20 @@ use objc2_app_kit::{
     NSParagraphStyleAttributeName, NSTextAlignment, NSView,
 };
 use objc2_foundation::{NSMutableAttributedString, NSPoint, NSRange, NSSize, NSString};
+use std::cell::RefCell;
+
+thread_local! {
+    /// The last title drawn: re-styling an unchanged item only makes the menu
+    /// bar flicker.
+    static LAST: RefCell<Option<(String, bool)>> = const { RefCell::new(None) };
+}
 
 /// Applies `title` (two lines, a `\n` between them) to the app's status item.
-pub fn apply(title: &str) {
+/// `critical` adds a red dot when a provider is under 15%.
+pub fn apply(title: &str, critical: bool) {
+    if LAST.with(|last| last.borrow().as_ref() == Some(&(title.to_owned(), critical))) {
+        return;
+    }
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
@@ -33,7 +44,8 @@ pub fn apply(title: &str) {
             continue;
         };
         if let Some(button) = find_button(&content) {
-            style(&button, title);
+            style(&button, title, critical);
+            LAST.with(|last| *last.borrow_mut() = Some((title.to_owned(), critical)));
             return;
         }
     }
@@ -43,9 +55,10 @@ pub fn apply(title: &str) {
 /// other status bar window in the app.
 fn find_button(view: &NSView) -> Option<Retained<NSButton>> {
     if let Some(button) = view.downcast_ref::<NSButton>()
-        && button
-            .toolTip()
-            .is_some_and(|tip| tip.to_string().contains("AI 额度"))
+        && button.toolTip().is_some_and(|tip| {
+            let tip = tip.to_string();
+            tip.contains("AI 额度") || tip.contains("AI quota")
+        })
     {
         return Some(button.retain());
     }
@@ -58,13 +71,43 @@ fn find_button(view: &NSView) -> Option<Retained<NSButton>> {
 }
 
 #[allow(deprecated)]
-fn style(button: &NSButton, title: &str) {
+fn style(button: &NSButton, title: &str, critical: bool) {
     // No image at all: clearing it removes the icon-sized gap.
     button.setImage(None);
     button.setImagePosition(NSCellImagePosition::NoImage);
 
-    let text = NSMutableAttributedString::from_nsstring(&NSString::from_str(title));
+    // A critical item is a plain image (the red dot must keep its color), so
+    // its text cannot rely on the template tint: pick the menu bar's own
+    // label color from its appearance.
+    let text_color = if critical {
+        let appearance: *mut objc2::runtime::AnyObject =
+            unsafe { msg_send![button, effectiveAppearance] };
+        let dark = if appearance.is_null() {
+            false
+        } else {
+            let name: *mut NSString = unsafe { msg_send![appearance, name] };
+            !name.is_null() && unsafe { &*name }.to_string().contains("Dark")
+        };
+        if dark {
+            NSColor::whiteColor()
+        } else {
+            NSColor::blackColor()
+        }
+    } else {
+        NSColor::labelColor()
+    };
+
+    // The dot is drawn with the text: a template image would tint it away,
+    // so a critical item is a plain image whose text uses the menu bar's
+    // label color.
+    let title = if critical {
+        format!("{title} ●")
+    } else {
+        title.to_owned()
+    };
+    let text = NSMutableAttributedString::from_nsstring(&NSString::from_str(&title));
     let length = title.encode_utf16().count();
+    let dot = if critical { Some(length - 1) } else { None };
     let paragraph = NSMutableParagraphStyle::new();
     paragraph.setAlignment(NSTextAlignment::Right);
     paragraph.setMinimumLineHeight(9.0);
@@ -79,7 +122,7 @@ fn style(button: &NSButton, title: &str) {
         );
         text.addAttribute_value_range(
             NSForegroundColorAttributeName,
-            &NSColor::labelColor(),
+            &text_color,
             NSRange::new(0, length),
         );
         text.addAttribute_value_range(
@@ -87,6 +130,13 @@ fn style(button: &NSButton, title: &str) {
             &paragraph,
             NSRange::new(0, length),
         );
+        if let Some(dot) = dot {
+            text.addAttribute_value_range(
+                NSForegroundColorAttributeName,
+                &NSColor::systemRedColor(),
+                NSRange::new(dot, 1),
+            );
+        }
     }
 
     // Draw the two lines into an image: NSButtonCell centers an image in the
@@ -98,7 +148,7 @@ fn style(button: &NSButton, title: &str) {
     // SAFETY: the attributed string draws into the locked image context.
     let _: () = unsafe { msg_send![&text, drawAtPoint: NSPoint::new(0.0, 0.0)] };
     image.unlockFocus();
-    image.setTemplate(true);
+    image.setTemplate(!critical);
 
     button.setTitle(&NSString::new());
     button.setImage(Some(&image));

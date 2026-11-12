@@ -142,21 +142,67 @@ impl Provider {
 // ------------------------------------------------------------------ helpers
 
 fn run(program: &str, args: &[&str]) -> Result<String, String> {
-    let output = Command::new(program)
+    // A CLI that hung (a network stall, an update prompt, an interactive
+    // login) must not leave the app busy forever.
+    let mut child = Command::new(program)
         .args(args)
         .env("NO_COLOR", "1")
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("{program}: {e}"))?;
-    if !output.status.success() {
-        let detail = String::from_utf8_lossy(&output.stderr);
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let out = stdout.map(|mut out| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = std::io::copy(&mut out, &mut bytes);
+            bytes
+        })
+    });
+    let err = stderr.map(|mut err| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = std::io::copy(&mut err, &mut bytes);
+            bytes
+        })
+    });
+    let deadline = Instant::now() + CLI_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "{program}: {}（{} 秒）",
+                    if i18n_language_is_english() {
+                        "timed out"
+                    } else {
+                        "超时未响应"
+                    },
+                    CLI_TIMEOUT.as_secs()
+                ));
+            }
+            Err(error) => return Err(format!("{program}: {error}")),
+        }
+    };
+    let stdout = out
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default();
+    let stderr = err
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default();
+    if !status.success() {
+        let detail = String::from_utf8_lossy(&stderr);
         let line = detail.lines().last().unwrap_or("").trim().to_owned();
         return Err(format!(
             "{program}: exited {}{}",
-            output
-                .status
-                .code()
-                .map(|c| c.to_string())
-                .unwrap_or_default(),
+            status.code().map(|c| c.to_string()).unwrap_or_default(),
             if line.is_empty() {
                 String::new()
             } else {
@@ -164,7 +210,12 @@ fn run(program: &str, args: &[&str]) -> Result<String, String> {
             }
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(String::from_utf8_lossy(&stdout).into_owned())
+}
+
+/// Whether the panel speaks English, for errors made off the UI thread.
+fn i18n_language_is_english() -> bool {
+    crate::i18n::is_english()
 }
 
 fn home(relative: &str) -> String {
@@ -494,6 +545,9 @@ impl CodexFailure {
         }
     }
 }
+
+/// How long a CLI may take before it is killed.
+const CLI_TIMEOUT: Duration = Duration::from_secs(25);
 
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 
@@ -1377,19 +1431,77 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 }
 
 /// The machine's offset from UTC in seconds, read from `date +%z`.
+/// The UTC offset in seconds, re-read every few minutes: daylight saving
+/// and travel must not leave the reset times an hour off.
 fn local_offset_seconds() -> i64 {
-    static OFFSET: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
-    *OFFSET.get_or_init(|| {
-        run("date", &["+%z"])
-            .ok()
-            .and_then(|text| {
-                let text = text.trim().to_owned();
-                let sign = if text.starts_with('-') { -1 } else { 1 };
-                let (hh, mm) = text.get(1..)?.split_at(2);
-                Some(sign * (hh.parse::<i64>().ok()? * 3600 + mm.parse::<i64>().ok()? * 60))
+    static OFFSET: std::sync::Mutex<Option<(i64, Instant)>> = std::sync::Mutex::new(None);
+    let mut cached = OFFSET.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some((offset, at)) = *cached
+        && at.elapsed() < Duration::from_secs(300)
+    {
+        return offset;
+    }
+    let offset = run("date", &["+%z"])
+        .ok()
+        .and_then(|text| {
+            let text = text.trim().to_owned();
+            let sign = if text.starts_with('-') { -1 } else { 1 };
+            let (hh, mm) = text.get(1..)?.split_at(2);
+            Some(sign * (hh.parse::<i64>().ok()? * 3600 + mm.parse::<i64>().ok()? * 60))
+        })
+        .unwrap_or(0);
+    *cached = Some((offset, Instant::now()));
+    offset
+}
+
+/// The newest release tag on GitHub, for the update hint.
+pub async fn latest_release() -> Result<String, String> {
+    let request =
+        HttpRequest::get("https://api.github.com/repos/tdawn0-0/quota-bar/releases/latest")
+            .header("Accept", "application/vnd.github+json")
+            .header("User-Agent", "quota-bar");
+    let response = fetch(request)
+        .await
+        .map_err(|error| format!("update: {error}"))?;
+    let status = response.status();
+    if !(200..300).contains(&status) {
+        return Err(format!("update: HTTP {status}"));
+    }
+    let value: Value =
+        serde_json::from_str(&response.text()).map_err(|error| format!("update: {error}"))?;
+    value
+        .get("tag_name")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "update: no tag_name".to_owned())
+}
+
+/// Whether release `tag` is newer than the running `current` version.
+pub fn is_newer(tag: &str, current: &str) -> bool {
+    fn parts(text: &str) -> Vec<u64> {
+        text.trim()
+            .trim_start_matches('v')
+            .split('.')
+            .map(|part| {
+                part.chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+                    .parse()
+                    .unwrap_or(0)
             })
-            .unwrap_or(0)
-    })
+            .collect()
+    }
+    let (new, old) = (parts(tag), parts(current));
+    for index in 0..new.len().max(old.len()) {
+        let (new, old) = (
+            new.get(index).copied().unwrap_or(0),
+            old.get(index).copied().unwrap_or(0),
+        );
+        if new != old {
+            return new > old;
+        }
+    }
+    false
 }
 
 #[cfg(test)]

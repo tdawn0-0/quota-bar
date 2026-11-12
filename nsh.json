@@ -6,6 +6,7 @@
   "rust": ".",
   "root": "App",
   "appearance": "system",
+  "singleInstance": true,
   "macos": {
     "activationPolicy": "accessory"
   },

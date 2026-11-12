@@ -12,11 +12,11 @@ list continues below the window and scrolls.
 
 ## Anatomy
 
-**Header.** The title, how long ago the data was refreshed (`22 秒前`, or
-`未刷新` before the first fetch), the **刷新** button, which reads
-**刷新中** while a batch is running, and the **置顶** button, which reads
-**已置顶** while the panel is pinned. Dragging any blank part of the header
-moves the window; the buttons still click.
+**Header.** The title, how long ago the data was refreshed (`刚刚`,
+`3 分钟前`, `2 小时前`), the **刷新** button, which reads **刷新中** while a
+batch is running, and the **置顶** button, which reads **已置顶** while the
+panel is pinned. Dragging any blank part of the header moves the window; the
+buttons still click.
 
 **Cards.** One card per enabled provider, in a fixed order:
 
@@ -33,11 +33,22 @@ The large percentage on the right is the provider's tightest window — the one
 that will run out first. Below it, each quota window gets a label, its own
 percentage, a progress bar, and a reset time said in words (`1 天 21 小时后重置`,
 `重置 11-16 08:00`, `当前不适用`). A final line carries credits or the expiry of
-the login. When a fetch fails, the card shows the error in red and keeps the
-last numbers it had.
+the login. When a fetch fails, the card shows the error in red, keeps the last
+numbers it had, and offers **重试** to run that one provider again.
 
-**Footer.** The enabled provider shortcuts (`ag · cc · cx · gk · gb · oc`) and
-**退出**.
+**Footer.** The enabled provider shortcuts (`ag · cc · cx · gk · gb · oc`),
+which open the settings, and **退出**. When a newer release is known, its
+version shows beside them.
+
+**Settings.** The shortcuts open a page with every provider on or off, the
+menu bar mode (all providers, or the two with the least left), the language
+(system, 中文, English), a launch-at-login switch, and the two optional
+alerts (under 15%, back to full). The window scrolls, so the page fits a
+small panel.
+
+**First moments.** Before the first answer the list shows a skeleton with
+`正在读取额度…`; when no provider is on (or none is signed in), it shows a
+short guide with the providers as switches, so there is always a way back in.
 
 ## Color
 
