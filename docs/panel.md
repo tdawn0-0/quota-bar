@@ -36,6 +36,10 @@ percentage, a progress bar, and a reset time said in words (`1 天 21 小时后�
 the login. When a fetch fails, the card shows the error in red, keeps the last
 numbers it had, and offers **重试** to run that one provider again.
 
+Quota labels and percentages use an explicit 18 pt line height, and reset
+details use 16 pt. This leaves room for Chinese fallback fonts and pixel
+rounding at fractional display scales inside the native text clipping box.
+
 **Footer.** The enabled provider shortcuts (`ag · cc · cx · gk · gb · oc`),
 which open the settings, and **退出**. When a newer release is known, its
 version shows beside them.

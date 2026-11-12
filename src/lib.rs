@@ -1750,6 +1750,8 @@ fn choice(
 }
 
 fn metric_row(metric: &quota::Metric) -> impl IntoElement {
+    // Leave room for CJK fallback glyphs and device-pixel rounding. Natural
+    // 11 px text can paint beyond its 15 px box at fractional display scales.
     let remaining = metric.remaining;
     // A fraction of the track, so a wider card gets a longer bar.
     let filled = (remaining.unwrap_or(0.0).clamp(0.0, 100.0) / 100.0) as f32;
@@ -1764,6 +1766,7 @@ fn metric_row(metric: &quota::Metric) -> impl IntoElement {
                 .child(
                     text(i18n::metric_label(&metric.label))
                         .text_size(px(11.0))
+                        .line_height(px(18.0))
                         .text_color(move || theme().foreground),
                 )
                 .child(
@@ -1772,6 +1775,7 @@ fn metric_row(metric: &quota::Metric) -> impl IntoElement {
                         None => "不适用".to_owned(),
                     })
                     .text_size(px(11.0))
+                    .line_height(px(18.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(value_color(remaining)),
                 ),
@@ -1794,6 +1798,7 @@ fn metric_row(metric: &quota::Metric) -> impl IntoElement {
         .child(
             text(i18n::metric_detail(&metric.detail))
                 .text_size(px(10.0))
+                .line_height(px(16.0))
                 .text_color(move || theme().muted_foreground),
         )
 }
