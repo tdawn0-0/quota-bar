@@ -93,3 +93,13 @@ The point of writing this in Rust is that an idle app should be close to free.
   hidden (`nsh.json` `window.defaultVisible: false`) and only gives the tray an
   owner.
 - The popup closes on blur, so its memory is released after use.
+
+### Linux text rendering patch
+
+`vendor/nsh-platform-linux` pins the 0.5.0 backend with a small font-context
+fix. Text measurement and drawing both use unhinted outlines; otherwise
+hinted CJK strokes can fall outside GSK's ink bounds and disappear under
+Vulkan glyph rendering or Cairo's rounded-clip traversal. Increasing the
+label's line height or forcing full redraws does not resolve this mismatch.
+See the vendored `QUOTA-BAR-PATCH.md` for provenance and the pixel regression
+test command. Keep the default renderer and panel corners enabled.

@@ -36,6 +36,10 @@ percentage, a progress bar, and a reset time said in words (`1 天 21 小时后�
 the login. When a fetch fails, the card shows the error in red, keeps the last
 numbers it had, and offers **重试** to run that one provider again.
 
+Quota labels and percentages use an explicit 18 pt line height, and reset
+details use 16 pt. This leaves room for Chinese fallback fonts and pixel
+rounding at fractional display scales inside the native text clipping box.
+
 **Footer.** The enabled provider shortcuts (`ag · cc · cx · gk · gb · oc`),
 which open the settings, and **退出**. When a newer release is known, its
 version shows beside them.
@@ -84,6 +88,12 @@ the fallback until you have resized it once.
 - On macOS, a second click on the tray item, a click in another app, or Escape
   closes it; the window's memory is released. Under GNOME, the tray label opens
   a menu and its **面板** item opens the panel.
+- On Linux, clicking another app leaves the panel open at its dragged position,
+  including on another monitor. This also applies after unpinning. Escape or
+  a second tray click still closes an unpinned panel; reopening lets the window
+  manager place a new window, since the GTK backend cannot restore coordinates.
+- Moving the Linux panel between display scales reapplies pixel alignment to
+  its content, including fractional scales, without resizing or reopening it.
 - Data refreshes at launch, every five minutes, with the **刷新** button, or
   from the tray's **刷新** item. A provider turned back on refreshes right away.
 - **置顶** pins the panel: it stays above other windows and outside clicks

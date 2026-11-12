@@ -3,8 +3,8 @@
 //! Resource budget: no busy loop. Data is fetched at launch, every five
 //! minutes, whenever the refresh control or menu item asks, and when a
 //! provider is turned back on; opening the panel only reads what is already in
-//! memory. The panel is a popup window that closes on blur, so an idle app is
-//! one tray item and a few kilobytes of state.
+//! memory. On macOS the popup closes on blur; on Linux it stays mapped so
+//! the compositor preserves the position chosen by dragging it.
 
 mod config;
 mod i18n;
@@ -858,13 +858,19 @@ fn set_tray_menu(store: Store) {
     });
 }
 
+fn panel_close_on_blur(pinned: bool) -> bool {
+    // GTK 4 cannot restore a toplevel's position on Wayland. Keep the
+    // Linux panel mapped when focus changes instead of discarding it.
+    cfg!(target_os = "macos") && !pinned
+}
+
 fn glass_attributes(pinned: bool) -> WindowAttributes {
     let mut attributes = WindowAttributes::default();
     attributes.transparent = Some(true);
     // No popover material: NSH 0.5 puts macOS's NSVisualEffectView behind
     // the whole rectangular window, so it shows as a square layer outside
     // the sheet's rounded corners. The sheet's own fill is the material.
-    attributes.close_on_blur = Some(!pinned);
+    attributes.close_on_blur = Some(panel_close_on_blur(pinned));
     attributes.level = Some(if pinned {
         WindowLevel::Floating
     } else {
@@ -909,7 +915,7 @@ fn toggle_pin(store: Store) {
     store.pinned.set(pinned);
     if let Some(panel) = PANEL.with(|slot| slot.borrow().clone()) {
         let mut attributes = WindowAttributes::default();
-        attributes.close_on_blur = Some(!pinned);
+        attributes.close_on_blur = Some(panel_close_on_blur(pinned));
         attributes.level = Some(if pinned {
             WindowLevel::Floating
         } else {
@@ -1049,10 +1055,13 @@ fn open_panel(store: Store, bounds: Option<Bounds<Points>>, pinned: bool) {
             panel.focus();
             // macOS may turn the first activation down; asking again once the
             // window exists takes the keyboard from the app in front.
-            let again = panel.clone();
-            set_timeout(Duration::from_millis(180), move || {
-                again.focus();
-            });
+            #[cfg(target_os = "macos")]
+            {
+                let again = panel.clone();
+                set_timeout(Duration::from_millis(180), move || {
+                    again.focus();
+                });
+            }
         }
         None => eprintln!("[quota-bar] panel window was refused"),
     }
@@ -1741,6 +1750,8 @@ fn choice(
 }
 
 fn metric_row(metric: &quota::Metric) -> impl IntoElement {
+    // Leave room for CJK fallback glyphs and device-pixel rounding. Natural
+    // 11 px text can paint beyond its 15 px box at fractional display scales.
     let remaining = metric.remaining;
     // A fraction of the track, so a wider card gets a longer bar.
     let filled = (remaining.unwrap_or(0.0).clamp(0.0, 100.0) / 100.0) as f32;
@@ -1755,6 +1766,7 @@ fn metric_row(metric: &quota::Metric) -> impl IntoElement {
                 .child(
                     text(i18n::metric_label(&metric.label))
                         .text_size(px(11.0))
+                        .line_height(px(18.0))
                         .text_color(move || theme().foreground),
                 )
                 .child(
@@ -1763,6 +1775,7 @@ fn metric_row(metric: &quota::Metric) -> impl IntoElement {
                         None => "不适用".to_owned(),
                     })
                     .text_size(px(11.0))
+                    .line_height(px(18.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(value_color(remaining)),
                 ),
@@ -1785,6 +1798,7 @@ fn metric_row(metric: &quota::Metric) -> impl IntoElement {
         .child(
             text(i18n::metric_detail(&metric.detail))
                 .text_size(px(10.0))
+                .line_height(px(16.0))
                 .text_color(move || theme().muted_foreground),
         )
 }
@@ -1792,6 +1806,14 @@ fn metric_row(metric: &quota::Metric) -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_panel_stays_open_when_focus_moves_to_another_app() {
+        for pinned in [false, true] {
+            assert_eq!(glass_attributes(pinned).close_on_blur, Some(false));
+        }
+    }
 
     fn metric(remaining: Option<f64>) -> quota::Metric {
         quota::Metric {

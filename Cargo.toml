@@ -21,6 +21,7 @@ panic = "abort"
 opt-level = "z"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+gtk4 = { version = "0.11", features = ["v4_14"] }
 nsh-platform-linux = { version = "0.5.0", default-features = false, features = [] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -28,3 +29,6 @@ nsh-platform-macos = { version = "0.5.0", default-features = false, features = [
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSWindow", "NSView", "NSButton", "NSFont", "NSColor", "NSImage", "NSParagraphStyle", "NSText"] }
 objc2-foundation = { version = "0.3.2", features = ["NSAttributedString", "NSString", "NSRange"] }
+
+[patch.crates-io]
+nsh-platform-linux = { path = "vendor/nsh-platform-linux" }
