@@ -53,11 +53,16 @@ everything else is healthy blue.
 
 ## Size and scrolling
 
-The window is sized for one 184 pt row per enabled provider, plus 104 pt of
-chrome, clamped to 220–656 pt. With three or more providers it is 656 pt tall;
-content that does not fit scrolls inside the sheet while the header and footer
-stay put. This keeps the panel from growing past a comfortable height on a
-laptop screen.
+The window opens 344 pt wide and as tall as one 184 pt row per enabled
+provider, plus 104 pt of chrome, clamped to 220–656 pt. With three or more
+providers it opens 656 pt tall; content that does not fit scrolls inside the
+sheet while the header and footer stay put.
+
+The panel is resizable from any edge or corner, down to 280 × 220 pt. Its
+contents follow the size: each card keeps a 240 pt basis and wraps into a
+second (or third) column when the window is wide enough, and the progress
+bars take a fraction of their card, so a wider panel reads side by side
+instead of leaving empty space.
 
 ## Behaviour
 

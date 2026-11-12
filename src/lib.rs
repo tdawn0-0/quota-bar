@@ -17,9 +17,11 @@ use std::time::Duration;
 
 use nsh_base::theme;
 use nsh_core::color::{rgb, rgba};
-use nsh_core::desktop::{TrayTitleRun, WindowAttributes, WindowKind, WindowLevel, WindowPosition};
+use nsh_core::desktop::{
+    ResizeEdge, TrayTitleRun, WindowAttributes, WindowKind, WindowLevel, WindowPosition,
+};
 use nsh_core::element::desktop::{MenuItem, WindowRef, open_window, quit, set_tray, tray, window};
-use nsh_core::geometry::{Bounds, Points, point, px, size};
+use nsh_core::geometry::{Bounds, Points, point, px, relative, size};
 #[cfg(target_os = "macos")]
 use nsh_core::platform::Lifecycle;
 use nsh_core::prelude::*;
@@ -479,6 +481,9 @@ fn glass_attributes(pinned: bool) -> WindowAttributes {
         WindowLevel::Normal
     });
     attributes.activate = Some(true);
+    // A popup is not resizable by default; the sheet's edges resize it.
+    attributes.resizable = Some(true);
+    attributes.min_size = Some(Some(size(px(280.0), px(220.0))));
     attributes
 }
 
@@ -640,25 +645,57 @@ fn panel(store: Store) -> impl IntoElement {
         .child(
             scroll().flex_1().w_full().child(
                 view()
-                    .flex_col()
+                    .flex_row()
+                    .flex_wrap()
                     .w_full()
                     .gap(px(8.0))
                     .px(px(12.0))
                     .pb(px(12.0))
                     .child(each(
-                        move || vec![store.revision.get()],
-                        |revision| *revision,
-                        move |_, _| {
-                            view()
-                                .flex_col()
-                                .w_full()
-                                .gap(px(8.0))
-                                .children(store.sources.get().into_iter().map(card))
+                        move || {
+                            let _ = store.revision.get();
+                            store.sources.get()
                         },
+                        move |source| (store.revision.get(), source.short),
+                        move |source, _| card(source.get()),
                     )),
             ),
         )
         .child(footer(store))
+        // A frameless window resizes by these invisible grips; corners go
+        // last so they win over the edges they overlap.
+        .child(resize_grip(ResizeEdge::Top))
+        .child(resize_grip(ResizeEdge::Bottom))
+        .child(resize_grip(ResizeEdge::Left))
+        .child(resize_grip(ResizeEdge::Right))
+        .child(resize_grip(ResizeEdge::TopLeft))
+        .child(resize_grip(ResizeEdge::TopRight))
+        .child(resize_grip(ResizeEdge::BottomLeft))
+        .child(resize_grip(ResizeEdge::BottomRight))
+}
+
+/// An invisible grip along one edge or corner of the frameless sheet: a
+/// press on it resizes the window instead of reaching the content.
+fn resize_grip(edge: ResizeEdge) -> impl IntoElement {
+    let grip = view().absolute().window_resize(edge);
+    match edge {
+        ResizeEdge::Top => grip.top(px(0.0)).left(px(12.0)).right(px(12.0)).h(px(5.0)),
+        ResizeEdge::Bottom => grip
+            .bottom(px(0.0))
+            .left(px(12.0))
+            .right(px(12.0))
+            .h(px(5.0)),
+        ResizeEdge::Left => grip.left(px(0.0)).top(px(12.0)).bottom(px(12.0)).w(px(5.0)),
+        ResizeEdge::Right => grip
+            .right(px(0.0))
+            .top(px(12.0))
+            .bottom(px(12.0))
+            .w(px(5.0)),
+        ResizeEdge::TopLeft => grip.top(px(0.0)).left(px(0.0)).size(px(12.0)),
+        ResizeEdge::TopRight => grip.top(px(0.0)).right(px(0.0)).size(px(12.0)),
+        ResizeEdge::BottomLeft => grip.bottom(px(0.0)).left(px(0.0)).size(px(12.0)),
+        ResizeEdge::BottomRight => grip.bottom(px(0.0)).right(px(0.0)).size(px(12.0)),
+    }
 }
 
 fn header(store: Store) -> impl IntoElement {
@@ -753,6 +790,9 @@ fn card(source: Source) -> impl IntoElement {
     let error = !source.error.is_empty();
     view()
         .flex_col()
+        .flex_1()
+        .basis(px(240.0))
+        .min_w(px(220.0))
         .gap(px(6.0))
         .p(px(11.0))
         .rounded(px(10.0))
@@ -802,8 +842,8 @@ fn card(source: Source) -> impl IntoElement {
 
 fn metric_row(metric: &quota::Metric) -> impl IntoElement {
     let remaining = metric.remaining;
-    let width = PANEL_WIDTH - 12.0 * 2.0 - 12.0 * 2.0;
-    let filled = (remaining.unwrap_or(0.0).clamp(0.0, 100.0) / 100.0 * width as f64) as f32;
+    // A fraction of the track, so a wider card gets a longer bar.
+    let filled = (remaining.unwrap_or(0.0).clamp(0.0, 100.0) / 100.0) as f32;
     view()
         .flex_col()
         .gap(px(3.0))
@@ -829,14 +869,14 @@ fn metric_row(metric: &quota::Metric) -> impl IntoElement {
         )
         .child(
             view()
-                .w(px(width))
+                .w_full()
                 .h(px(4.0))
                 .rounded(px(2.0))
                 .bg(move || theme().muted)
                 .overflow_hidden()
                 .child(
                     view()
-                        .w(px(filled))
+                        .w(relative(filled))
                         .h(px(4.0))
                         .rounded(px(2.0))
                         .bg(tone(remaining)),
