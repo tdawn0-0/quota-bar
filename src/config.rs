@@ -15,7 +15,7 @@
 //! }
 //! ```
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -30,15 +30,35 @@ fn seen() -> std::sync::MutexGuard<'static, Option<String>> {
     SEEN.lock().unwrap_or_else(|error| error.into_inner())
 }
 
+/// The size the user last resized the panel to, in points.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PanelSize {
+    pub width: f32,
+    pub height: f32,
+}
+
 /// Which providers are on, by provider id. Missing ids are enabled.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Config {
     enabled: BTreeMap<String, bool>,
+    /// Providers startup detection found missing. They are off without
+    /// being written to the file: installing one later finds it on again.
+    hidden: BTreeSet<String>,
+    panel: Option<PanelSize>,
 }
 
 impl Config {
     pub fn enabled(&self, id: &str) -> bool {
-        self.enabled.get(id).copied().unwrap_or(true)
+        match self.enabled.get(id) {
+            Some(on) => *on,
+            None => !self.hidden.contains(id),
+        }
+    }
+
+    /// Leaves a provider off without choosing it: detection does this for a
+    /// tool this machine does not have.
+    pub fn hide(&mut self, id: &str) {
+        self.hidden.insert(id.to_owned());
     }
 
     /// Whether the file names this provider (rather than leaving it to the
@@ -49,6 +69,15 @@ impl Config {
 
     pub fn set_enabled(&mut self, id: &str, on: bool) {
         self.enabled.insert(id.to_owned(), on);
+    }
+
+    /// The panel size the file remembers, if any.
+    pub fn panel(&self) -> Option<PanelSize> {
+        self.panel
+    }
+
+    pub fn set_panel(&mut self, size: PanelSize) {
+        self.panel = Some(size);
     }
 
     /// Reads the file; every provider is on when there is none. A file that
@@ -123,12 +152,27 @@ impl Config {
             .iter()
             .map(|(id, on)| (id.clone(), json!(on)))
             .collect();
-        json!({ "providers": providers })
+        let mut value = json!({ "providers": providers });
+        if let Some(panel) = self.panel {
+            value["panel"] = json!({ "width": panel.width, "height": panel.height });
+        }
+        value
     }
 
     fn parse(text: &str) -> Result<Self, String> {
         let value: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
         let mut config = Self::default();
+        if let Some(panel) = value.get("panel").filter(|panel| !panel.is_null()) {
+            let width = panel.get("width").and_then(Value::as_f64);
+            let height = panel.get("height").and_then(Value::as_f64);
+            let (Some(width), Some(height)) = (width, height) else {
+                return Err("panel needs a width and a height".to_owned());
+            };
+            config.panel = Some(PanelSize {
+                width: width as f32,
+                height: height as f32,
+            });
+        }
         let Some(providers) = value.get("providers") else {
             return Ok(config);
         };
@@ -216,5 +260,47 @@ mod tests {
         config.set_enabled("opencode", true);
         let text = serde_json::to_string(&config.to_json()).unwrap();
         assert_eq!(Config::parse(&text).unwrap(), config);
+    }
+
+    #[test]
+    fn the_panel_size_is_saved_and_read_back() {
+        let mut config = Config::default();
+        config.set_panel(PanelSize {
+            width: 512.0,
+            height: 400.0,
+        });
+        let text = serde_json::to_string(&config.to_json()).unwrap();
+        assert_eq!(Config::parse(&text).unwrap(), config);
+        assert_eq!(
+            Config::parse(r#"{"panel":{"width":300,"height":250}}"#)
+                .unwrap()
+                .panel(),
+            Some(PanelSize {
+                width: 300.0,
+                height: 250.0
+            })
+        );
+    }
+
+    #[test]
+    fn detection_stays_out_of_the_file() {
+        let mut config = Config::parse(r#"{"providers":{"claude":true}}"#).unwrap();
+        config.hide("antigravity");
+        assert!(!config.enabled("antigravity"));
+        assert!(!config.declared("antigravity"));
+        let text = serde_json::to_string(&config.to_json()).unwrap();
+        assert!(!text.contains("antigravity"));
+        // Installing the tool later finds it on again.
+        assert!(Config::parse(&text).unwrap().enabled("antigravity"));
+    }
+
+    #[test]
+    fn a_panel_without_a_size_is_an_error() {
+        assert!(Config::parse(r#"{"panel":{"width":300}}"#).is_err());
+        assert!(Config::parse(r#"{"panel":true}"#).is_err());
+        assert_eq!(
+            Config::parse(r#"{"panel":null}"#).unwrap(),
+            Config::default()
+        );
     }
 }

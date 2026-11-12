@@ -124,8 +124,16 @@ An entry can also be an object, leaving room for provider settings later:
 "claude": { "enabled": false }
 ```
 
-Edits take effect on the next refresh. Hidden providers are neither fetched nor
-shown.
+Resizing the panel writes the size it was left at back to the same file, so it
+opens that way next time:
+
+```json
+"panel": { "width": 686, "height": 371 }
+```
+
+Only providers you chose are written. A tool startup detection leaves off is
+not saved as `false`, so installing it later finds it on again. Edits take
+effect on the next refresh; hidden providers are neither fetched nor shown.
 
 ## How it refreshes
 

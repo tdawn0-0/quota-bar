@@ -62,7 +62,9 @@ The panel is resizable from any edge or corner, down to 280 × 220 pt. Its
 contents follow the size: each card keeps a 240 pt basis and wraps into a
 second (or third) column when the window is wide enough, and the progress
 bars take a fraction of their card, so a wider panel reads side by side
-instead of leaving empty space.
+instead of leaving empty space. The size you leave it at is saved in the
+config file (`panel`) and used the next time it opens; the provider rows are
+the fallback until you have resized it once.
 
 ## Behaviour
 

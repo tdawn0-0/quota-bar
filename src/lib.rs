@@ -20,7 +20,9 @@ use nsh_core::color::{rgb, rgba};
 use nsh_core::desktop::{
     ResizeEdge, TrayTitleRun, WindowAttributes, WindowKind, WindowLevel, WindowPosition,
 };
-use nsh_core::element::desktop::{MenuItem, WindowRef, open_window, quit, set_tray, tray, window};
+use nsh_core::element::desktop::{
+    MenuItem, WindowRef, current_window, open_window, quit, set_tray, tray, window,
+};
 use nsh_core::geometry::{Bounds, Points, point, px, relative, size};
 #[cfg(target_os = "macos")]
 use nsh_core::platform::Lifecycle;
@@ -31,6 +33,10 @@ use quota::Source;
 
 const PANEL_WIDTH: f32 = 344.0;
 const PANEL_MAX_HEIGHT: f32 = 656.0;
+/// The bounds a resize may take the panel to.
+const PANEL_MIN_WIDTH: f32 = 280.0;
+const PANEL_MIN_HEIGHT: f32 = 220.0;
+const PANEL_MAX_SIZE: f32 = 1200.0;
 
 const BLUE: u32 = 0x0a84ff;
 const AMBER: u32 = 0xff9f0a;
@@ -48,6 +54,16 @@ thread_local! {
     static PANEL: RefCell<Option<WindowRef>> = const { RefCell::new(None) };
     /// When it opened, so activation that arrives late does not close it.
     static OPENED_AT: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+    /// The first size the panel reports is the one it opened at; only a
+    /// later one is a resize worth keeping.
+    static PANEL_SIZE_SEEN: Cell<bool> = const { Cell::new(false) };
+    static PANEL_SIZE_LAST: Cell<Option<(f32, f32)>> = const { Cell::new(None) };
+    /// The newest resize wins: an older debounce does not save.
+    static PANEL_SIZE_SEQ: Cell<u64> = const { Cell::new(0) };
+    /// What the window was asked to open at, and the window manager's border
+    /// around the content (a GTK window's state leaves it out).
+    static PANEL_REQUEST: Cell<Option<(f32, f32)>> = const { Cell::new(None) };
+    static PANEL_BORDER: Cell<Option<(f32, f32)>> = const { Cell::new(None) };
 }
 
 /// The signals the app shares between its tray handler and its panel.
@@ -164,7 +180,7 @@ fn load_config() -> config::Config {
 fn detect_providers(config: &mut config::Config) {
     for provider in quota::PROVIDERS {
         if !config.declared(provider.id) && !provider.detected() {
-            config.set_enabled(provider.id, false);
+            config.hide(provider.id);
         }
     }
 }
@@ -483,7 +499,7 @@ fn glass_attributes(pinned: bool) -> WindowAttributes {
     attributes.activate = Some(true);
     // A popup is not resizable by default; the sheet's edges resize it.
     attributes.resizable = Some(true);
-    attributes.min_size = Some(Some(size(px(280.0), px(220.0))));
+    attributes.min_size = Some(Some(size(px(PANEL_MIN_WIDTH), px(PANEL_MIN_HEIGHT))));
     attributes
 }
 
@@ -529,6 +545,71 @@ fn toggle_pin(store: Store) {
     }
 }
 
+/// Keeps the size the user resizes the panel to, once a drag settles.
+fn track_panel_size(store: Store) {
+    let window = current_window();
+    effect(move || {
+        let Some(state) = window.state() else {
+            return;
+        };
+        if !state.visible {
+            return;
+        }
+        let bounds = (state.bounds.size.width.0, state.bounds.size.height.0);
+        // `default_size` is the outer size; a GTK window reports its content,
+        // without the window manager's border. Add that back, or each open
+        // would shrink the panel by it.
+        let border = PANEL_BORDER.with(Cell::get).unwrap_or_else(|| {
+            let request = PANEL_REQUEST.with(Cell::get).unwrap_or(bounds);
+            let border = (
+                (request.0 - bounds.0).max(0.0).round(),
+                (request.1 - bounds.1).max(0.0).round(),
+            );
+            PANEL_BORDER.with(|slot| slot.set(Some(border)));
+            border
+        });
+        let size = ((bounds.0 + border.0).round(), (bounds.1 + border.1).round());
+        if PANEL_SIZE_LAST.with(Cell::get) == Some(size) {
+            return;
+        }
+        if !PANEL_SIZE_SEEN.with(|seen| seen.replace(true)) {
+            // What it opened at, not a resize.
+            PANEL_SIZE_LAST.with(|last| last.set(Some(size)));
+            return;
+        }
+        let sequence = PANEL_SIZE_SEQ.with(|seq| {
+            seq.set(seq.get().wrapping_add(1));
+            seq.get()
+        });
+        set_timeout(Duration::from_millis(700), move || {
+            if PANEL_SIZE_SEQ.with(Cell::get) != sequence {
+                return;
+            }
+            PANEL_SIZE_LAST.with(|last| last.set(Some(size)));
+            save_panel_size(store, size);
+        });
+    });
+}
+
+fn save_panel_size(store: Store, (width, height): (f32, f32)) {
+    if !(PANEL_MIN_WIDTH..=PANEL_MAX_SIZE).contains(&width)
+        || !(PANEL_MIN_HEIGHT..=PANEL_MAX_SIZE).contains(&height)
+    {
+        return;
+    }
+    let mut config = store.config.get();
+    let panel = config::PanelSize { width, height };
+    if config.panel() == Some(panel) {
+        return;
+    }
+    config.set_panel(panel);
+    if let Err(error) = config.save() {
+        eprintln!("[quota-bar] config: {error}");
+        return;
+    }
+    store.config.set(config);
+}
+
 /// Tall enough for one card per enabled provider, never taller than before.
 fn panel_height(store: Store) -> f32 {
     let config = store.config.get();
@@ -539,10 +620,27 @@ fn panel_height(store: Store) -> f32 {
     (104.0 + count as f32 * 184.0).clamp(220.0, PANEL_MAX_HEIGHT)
 }
 
+/// The size the panel opens with: the one it was left at, else the one the
+/// enabled providers ask for.
+fn opening_size(store: Store) -> (f32, f32) {
+    match store.config.get().panel() {
+        Some(saved) => (
+            saved.width.clamp(PANEL_MIN_WIDTH, PANEL_MAX_SIZE),
+            saved.height.clamp(PANEL_MIN_HEIGHT, PANEL_MAX_SIZE),
+        ),
+        None => (PANEL_WIDTH, panel_height(store)),
+    }
+}
+
 fn open_panel(store: Store, bounds: Option<Bounds<Points>>, pinned: bool) {
     store.pinned.set(pinned);
+    PANEL_SIZE_SEEN.with(|seen| seen.set(false));
+    PANEL_SIZE_LAST.with(|last| last.set(None));
+    PANEL_BORDER.with(|border| border.set(None));
+    let (width, height) = opening_size(store);
+    PANEL_REQUEST.with(|request| request.set(Some((width, height))));
     let position = bounds.map(|icon| {
-        let x = icon.origin.x.0 + icon.size.width.0 / 2.0 - PANEL_WIDTH / 2.0;
+        let x = icon.origin.x.0 + icon.size.width.0 / 2.0 - width / 2.0;
         let y = icon.origin.y.0 + icon.size.height.0 + 6.0;
         WindowPosition::At(point(px(x.max(8.0)), px(y)))
     });
@@ -559,7 +657,7 @@ fn open_panel(store: Store, bounds: Option<Bounds<Points>>, pinned: bool) {
         .id("panel")
         .kind(WindowKind::Popup)
         .attributes(glass_attributes(pinned))
-        .default_size(size(px(PANEL_WIDTH), px(panel_height(store))))
+        .default_size(size(px(width), px(height)))
         .on_open_change(move |change| {
             if !change.open {
                 PANEL.with(|slot| *slot.borrow_mut() = None);
@@ -627,6 +725,7 @@ fn value_color(remaining: Option<f64>) -> AdaptiveColor {
 }
 
 fn panel(store: Store) -> impl IntoElement {
+    track_panel_size(store);
     // A window's content is made once: plain elements would keep the cards
     // from the moment it opened. The cards live in a reactive region keyed
     // on the list's revision, so every fetch that lands rebuilds them.
