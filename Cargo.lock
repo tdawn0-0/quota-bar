@@ -2093,8 +2093,6 @@ dependencies = [
 [[package]]
 name = "nsh-platform-linux"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef580b093e688cf9d7f4b072b220c77eb69b08686a346ca97280b11a2b51028a"
 dependencies = [
  "crossbeam-channel",
  "gstreamer",
