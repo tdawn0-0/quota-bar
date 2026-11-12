@@ -821,11 +821,11 @@ fn set_tray_menu(store: Store) {
     if std::env::var_os("QUOTA_BAR_DEBUG").is_some() {
         eprintln!("[quota-bar] tray title {macos_title:?}");
     }
-    // NSH sizes the status item to its title; give macOS the two-line title
-    // from the start so a long single-line one never widens it past the menu
-    // bar. The AppKit pass below then sets the compact monospaced font.
+    // macOS gets no title from NSH: its menu bar font is much larger than
+    // the two compact lines, so every refresh would show it grow and shrink
+    // before the AppKit pass replaced it. The image below is the only title.
     #[cfg(target_os = "macos")]
-    let title = vec![TrayTitleRun::new(macos_title.clone())];
+    let title: Vec<TrayTitleRun> = Vec::new();
     #[cfg(not(target_os = "macos"))]
     let title = tray_runs(store);
     set_tray(

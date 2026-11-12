@@ -156,4 +156,6 @@ fn style(button: &NSButton, title: &str) {
     button.setTitle(&NSString::new());
     button.setImage(Some(&image));
     button.setImagePosition(NSCellImagePosition::ImageOnly);
+    // NSH gives the item no title on macOS: the image is what sizes it.
+    button.sizeToFit();
 }
