@@ -7,6 +7,8 @@
 //! one tray item and a few kilobytes of state.
 
 mod config;
+#[cfg(target_os = "macos")]
+mod macos_tray;
 mod quota;
 
 use std::cell::{Cell, RefCell};
@@ -256,6 +258,58 @@ fn keep_last(previous: Vec<Source>, mut source: Source) -> Source {
     source
 }
 
+/// Two compact lines: each provider's 5-hour value above its weekly one.
+/// MacOS only; the status item is styled with it after NSH sets the tray.
+#[cfg(target_os = "macos")]
+fn macos_tray_title(store: Store) -> String {
+    let config = store.config.get();
+    let sources = store.sources.get();
+    let mut top = Vec::new();
+    let mut bottom = Vec::new();
+    for provider in quota::PROVIDERS
+        .iter()
+        .filter(|provider| config.enabled(provider.id))
+    {
+        let source = sources.iter().find(|source| source.short == provider.short);
+        let five = source.and_then(|source| window_remaining(source, true));
+        let week = source.and_then(|source| window_remaining(source, false));
+        let segment = format!("{}{}", provider.short, tray_value(five));
+        let width = segment.chars().count();
+        top.push(segment);
+        bottom.push(format!("{:>width$}", tray_value(week)));
+    }
+    if top.is_empty() {
+        return "额度".to_owned();
+    }
+    format!("{}\n{}", top.join(" "), bottom.join(" "))
+}
+
+#[cfg(target_os = "macos")]
+fn tray_value(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.0}"))
+        .unwrap_or_else(|| "-".to_owned())
+}
+
+/// The tightest 5-hour (or rolling) window, or the tightest weekly one.
+#[cfg(target_os = "macos")]
+fn window_remaining(source: &Source, five_hour: bool) -> Option<f64> {
+    source
+        .metrics
+        .iter()
+        .filter(|metric| {
+            if five_hour {
+                (metric.label.contains('5') && metric.label.contains("小时"))
+                    || metric.label == "会话"
+                    || metric.label.contains("滚动")
+            } else {
+                metric.label.contains('周')
+            }
+        })
+        .filter_map(|metric| metric.remaining)
+        .reduce(f64::min)
+}
+
 fn tray_runs(store: Store) -> Vec<TrayTitleRun> {
     if !store.tray_ready.get() {
         return Vec::new();
@@ -335,6 +389,8 @@ fn set_provider(store: Store, id: &'static str, on: bool) {
 
 fn set_tray_menu(store: Store) {
     let config = store.config.get();
+    #[cfg(target_os = "macos")]
+    let macos_title = macos_tray_title(store);
     set_tray(
         tray()
             .icon(TRAY_ICON)
@@ -349,6 +405,13 @@ fn set_tray_menu(store: Store) {
                 MenuItem::new("退出").on_select(quit),
             ]),
     );
+    // NSH sets its one-line title and transparent icon first; AppKit gets
+    // the compact two-line, icon-less item right after.
+    #[cfg(target_os = "macos")]
+    set_timeout(Duration::from_millis(80), move || {
+        // The task is queued; dropping the future only drops its result.
+        drop(run_on_main_thread(move || macos_tray::apply(&macos_title)));
+    });
 }
 
 fn glass_attributes(pinned: bool) -> WindowAttributes {

@@ -12,18 +12,19 @@ and no JavaScript runtime. Written in Rust with [NSH](https://nsh.dev).
 
 <img src="docs/images/panel-three.png" width="416" alt="The Quota Bar panel showing Codex, Grok Build and OpenCode Go">
 
-The menu bar carries the tightest window of every enabled provider, two letters
-per tool, so the number that runs out first is the one you see:
+The macOS menu bar item is text only, two compact lines: the 5-hour (or
+rolling) window of every enabled provider above its weekly window. Providers
+without a 5-hour window show `-` on the top line:
 
-<img src="docs/images/menu-bar.png" width="340" alt="Menu bar title reading cx 86% gk 82% oc 89%">
+<img src="docs/images/menu-bar.png" width="340" alt="Menu bar title with 5-hour quotas above weekly quotas">
 
 Six dashboards is five too many. Quota Bar reads the CLIs you already have
 signed in, keeps the numbers in memory, and stays out of the way.
 
 ## Why it feels good
 
-- **One glance, no navigation.** The tray title shows the number that will run
-  out first. Click it for every window and reset time.
+- **One glance, no navigation.** The tray title shows the 5-hour and weekly
+  windows side by side in two lines. Click it for every window and reset time.
 - **Native, not a dashboard.** Rust, AppKit on macOS, GTK 4 on Linux. No web
   view, no Electron, no JavaScript runtime.
 - **Close to free when idle.** One timer, no polling loop, no window while the

@@ -25,3 +25,6 @@ nsh-platform-linux = { version = "0.5.0", default-features = false, features = [
 
 [target.'cfg(target_os = "macos")'.dependencies]
 nsh-platform-macos = { version = "0.5.0", default-features = false, features = [] }
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSWindow", "NSView", "NSButton", "NSFont", "NSColor", "NSParagraphStyle", "NSText"] }
+objc2-foundation = { version = "0.3.2", features = ["NSAttributedString", "NSString", "NSRange"] }
